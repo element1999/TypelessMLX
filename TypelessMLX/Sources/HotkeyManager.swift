@@ -33,7 +33,7 @@ class HotkeyManager {
     @objc private func handleAudioDeviceLost() {
         logError("HotkeyManager", "Audio device lost during recording")
         guard let appState = appState else { return }
-        handleFailure(appState: appState, message: "錄音裝置中斷，請重新連接麥克風")
+        handleFailure(appState: appState, message: "录音设备中断，请重新连接麦克风")
     }
 
     private func setupMonitors() {
@@ -109,7 +109,7 @@ class HotkeyManager {
         let modelType = appState.selectedModel.modelType
         if modelType != "macos", !appState.hasPythonBackend {
             if appState.showFloatingOverlay {
-                overlay?.show(text: "⏳ 載入模型中...", isRecording: false)
+                overlay?.show(text: "⏳ 加载模型中...", isRecording: false)
             }
             lock.lock()
             isRecording = false
@@ -133,7 +133,7 @@ class HotkeyManager {
         appState.liveTranscriptionUnconfirmedText = ""
 
         if appState.showFloatingOverlay {
-            overlay?.show(text: "🎙 錄音中...", isRecording: true)
+            overlay?.show(text: "🎙 录音中...", isRecording: true)
         }
 
         // Wire audio level → overlay bars
@@ -158,7 +158,7 @@ class HotkeyManager {
             AudioRecorder.shared.audioLevelHandler = nil
             AudioRecorder.shared.audioBufferHandler = nil
             SpeechStreamer.shared.cancelStreaming()
-            handleFailure(appState: appState, message: "找不到可用的音訊輸入裝置，請連接或選擇麥克風")
+            handleFailure(appState: appState, message: "找不到可用的音频输入设备，请连接或选择麦克风")
             return
         }
 
@@ -194,7 +194,7 @@ class HotkeyManager {
             guard let audioURL = audioURL else {
                 logError("HotkeyManager", "stopRecording returned nil URL")
                 SpeechStreamer.shared.cancelStreaming()
-                self.handleFailure(appState: appState, message: "錄音失敗，未取得音訊檔案")
+                self.handleFailure(appState: appState, message: "录音失败，未获取到音频文件")
                 return
             }
 
@@ -214,7 +214,7 @@ class HotkeyManager {
             DispatchQueue.main.async {
                 appState.setStatus(.transcribing)
                 if appState.showFloatingOverlay {
-                    self.overlay?.show(text: "⏳ 辨識中...", isRecording: false)
+                    self.overlay?.show(text: "⏳ 识别中...", isRecording: false)
                 }
             }
 
@@ -257,8 +257,8 @@ class HotkeyManager {
                         let isTimeout = (error as NSError).code == -4
                         let isFirstRun = appState.selectedModel.modelType == "qwen3"
                         let message = isTimeout && isFirstRun
-                            ? "模型首次載入需下載 ~1GB，請稍候幾分鐘再試（選單列顯示辨識中時請勿關閉 App）"
-                            : "辨識失敗：\(error.localizedDescription)"
+                            ? "模型首次加载需下载 ~1GB，请稍候几分钟再试（菜单栏显示识别中时请勿关闭 App）"
+                            : "识别失败：\(error.localizedDescription)"
                         self.handleFailure(appState: appState, message: message)
                     }
                 }

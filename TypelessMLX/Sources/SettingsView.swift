@@ -20,7 +20,7 @@ struct SettingsView: View {
 
             HistorySettingsTab()
                 .environmentObject(appState)
-                .tabItem { Label("歷史", systemImage: "clock") }
+                .tabItem { Label("历史", systemImage: "clock") }
                 .tag(2)
         }
         .frame(width: 480, height: 420)
@@ -36,59 +36,59 @@ struct GeneralSettingsTab: View {
 
     var body: some View {
         Form {
-            Section("快捷鍵") {
+            Section("快捷键") {
                 HStack {
-                    Text("辨識快捷鍵")
+                    Text("识别快捷键")
                     Spacer()
                     Text(hotkeyDisplayName).foregroundColor(.secondary)
                 }
 
                 Picker("模式", selection: $appState.hotkeyMode) {
-                    Text("切換模式（按一下開始，再按停止）").tag("toggle")
-                    Text("按住模式（按住錄音，放開停止）").tag("hold")
+                    Text("切换模式（点击开始，再按停止）").tag("toggle")
+                    Text("按住模式（按住录音，松开停止）").tag("hold")
                 }
             }
 
-            Section("錄音裝置") {
-                Picker("輸入裝置", selection: $appState.inputDeviceUID) {
-                    Text("系統預設").tag("")
+            Section("录音设备") {
+                Picker("输入设备", selection: $appState.inputDeviceUID) {
+                    Text("系统默认").tag("")
                     ForEach(inputDevices, id: \.uid) { device in
                         Text(device.name).tag(device.uid)
                     }
                 }
             }
 
-            Section("顯示") {
-                Toggle("顯示浮動錄音指示器", isOn: $appState.showFloatingOverlay)
-                Toggle("開機自動啟動", isOn: $appState.launchAtLogin)
+            Section("显示") {
+                Toggle("显示悬浮录音指示器", isOn: $appState.showFloatingOverlay)
+                Toggle("开机自动启动", isOn: $appState.launchAtLogin)
                     .onChange(of: appState.launchAtLogin) { newValue in
                         setLaunchAtLogin(newValue)
                     }
             }
 
-            Section("權限狀態") {
+            Section("权限状态") {
                 HStack {
-                    Text("麥克風")
+                    Text("麦克风")
                     Spacer()
                     PermissionBadge(granted: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized)
                 }
                 HStack {
-                    Text("輔助使用（Accessibility）")
+                    Text("辅助功能（Accessibility）")
                     Spacer()
                     PermissionBadge(granted: AXIsProcessTrusted())
                 }
                 HStack {
-                    Text("Python 後端")
+                    Text("Python 后端")
                     Spacer()
                     PermissionBadge(granted: appState.hasPythonBackend)
                 }
-                Button("開啟系統設定") {
+                Button("打开系统设置") {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy")!)
                 }
                 .buttonStyle(.link)
             }
 
-            Section("關於") {
+            Section("关于") {
                 HStack {
                     Text("版本")
                     Spacer()
@@ -134,7 +134,7 @@ struct PermissionBadge: View {
         HStack(spacing: 4) {
             Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .foregroundColor(granted ? .green : .red)
-            Text(granted ? "已授權" : "未授權")
+            Text(granted ? "已授权" : "未授权")
                 .font(.caption)
                 .foregroundColor(.secondary)
         }
@@ -177,7 +177,7 @@ struct ModelRow: View {
                     if isDownloading {
                         HStack(spacing: 4) {
                             ProgressView().scaleEffect(0.7).frame(width: 14, height: 14)
-                            Text(downloadStatusText.isEmpty ? "下載中..." : downloadStatusText)
+                            Text(downloadStatusText.isEmpty ? "下载中..." : downloadStatusText)
                                 .font(.caption).foregroundColor(.orange)
                         }
                     } else if isCached {
@@ -186,10 +186,10 @@ struct ModelRow: View {
                         }
                         .buttonStyle(.plain)
                         .foregroundColor(.secondary)
-                        .help("刪除本地快取")
+                        .help("删除本地缓存")
                     } else {
                         Button(action: onDownload) {
-                            Label("下載", systemImage: "arrow.down.circle")
+                            Label("下载", systemImage: "arrow.down.circle")
                                 .font(.caption)
                         }
                         .buttonStyle(.bordered)
@@ -215,9 +215,9 @@ struct ModelRow: View {
         } else if isDownloading {
             EmptyView()
         } else if isCached {
-            badge(sizeString.isEmpty ? "已下載" : sizeString, color: .green)
+            badge(sizeString.isEmpty ? "已下载" : sizeString, color: .green)
         } else {
-            badge("未下載", color: .secondary)
+            badge("未下载", color: .secondary)
         }
     }
 
@@ -257,12 +257,12 @@ struct ModelSettingsTab: View {
                 }
             }
             .onAppear { modelManager.refreshAllStatuses() }
-            .alert("刪除模型快取", isPresented: Binding(
+            .alert("删除模型缓存", isPresented: Binding(
                 get: { deleteConfirmModelID != nil },
                 set: { if !$0 { deleteConfirmModelID = nil } }
             )) {
                 Button("取消", role: .cancel) { deleteConfirmModelID = nil }
-                Button("刪除", role: .destructive) {
+                Button("删除", role: .destructive) {
                     if let id = deleteConfirmModelID,
                        let model = AppState.availableModels.first(where: { $0.id == id }) {
                         try? modelManager.delete(model)
@@ -272,14 +272,14 @@ struct ModelSettingsTab: View {
             } message: {
                 if let id = deleteConfirmModelID,
                    let model = AppState.availableModels.first(where: { $0.id == id }) {
-                    Text("確定要刪除「\(model.id)」的本地快取嗎？下次使用時需要重新下載。")
+                    Text("确定要删除「\(model.id)」的本地缓存吗？下次使用时需要重新下载。")
                 }
             }
-            .alert("下載失敗", isPresented: Binding(
+            .alert("下载失败", isPresented: Binding(
                 get: { modelManager.downloadError != nil },
                 set: { if !$0 { modelManager.downloadError = nil } }
             )) {
-                Button("重試") {
+                Button("重试") {
                     if let errMsg = modelManager.downloadError,
                        let id = errMsg.components(separatedBy: "：").last,
                        let model = AppState.availableModels.first(where: { $0.id == id }) {
@@ -292,39 +292,39 @@ struct ModelSettingsTab: View {
                 Text(modelManager.downloadError ?? "")
             }
 
-            Section("語言") {
-                Picker("辨識語言", selection: $appState.language) {
-                    Text("自動偵測").tag("auto")
-                    Text("中文（台灣）").tag("zh")
+            Section("语言") {
+                Picker("识别语言", selection: $appState.language) {
+                    Text("自动检测").tag("auto")
+                    Text("中文（简体）").tag("zh")
                     Text("英文").tag("en")
                     Text("日文").tag("ja")
-                    Text("韓文").tag("ko")
+                    Text("韩文").tag("ko")
                 }
             }
 
-            Section(header: Text("文字後處理"),
-                    footer: Text("文字修正：使用 Apple Foundation Models 修正標點與錯字，需 macOS 26 + Apple Intelligence。\n移除猶豫詞：不需要 Apple Intelligence，所有 macOS 版本皆可使用，僅移除無語義的發音猶豫（呃、嗯、啊），不影響「那個」「就是」等詞彙。")) {
-                Toggle("啟用文字修正", isOn: $appState.enableTextRefinement)
+            Section(header: Text("文字后处理"),
+                    footer: Text("文字修正：使用 Apple Foundation Models 修正标点与错字，需 macOS 26 + Apple Intelligence。\n移除犹豫词：无需 Apple Intelligence，所有 macOS 版本均可使用，仅移除无语义的语音犹豫（呃、嗯、啊），不影响「那个」「就是」等词汇。")) {
+                Toggle("启用文字修正", isOn: $appState.enableTextRefinement)
                     .onChange(of: appState.enableTextRefinement) { newValue in
                         if newValue, #available(macOS 26, *) {
                             Task { await TextRefiner.shared.warmUp() }
                         }
                     }
-                Text("預設關閉可省下數百毫秒，僅在需要標點修正時再開啟。")
+                Text("默认关闭可节省数百毫秒，仅在需要标点修正时再开启。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                Toggle("移除語音猶豫詞（呃、嗯、啊⋯）", isOn: $appState.removeFillers)
+                Toggle("移除语音犹豫词（呃、嗯、啊…）", isOn: $appState.removeFillers)
             }
 
-            Section(header: Text("提示詞（Initial Prompt）"),
-                    footer: Text("引導辨識結果的格式與語言風格，可留空")) {
+            Section(header: Text("提示词（Initial Prompt）"),
+                    footer: Text("引导识别结果的格式与语言风格，可留空")) {
                 TextEditor(text: $appState.initialPrompt)
                     .font(.body)
                     .frame(height: 72)
                     .overlay(alignment: .topLeading) {
                         if appState.initialPrompt.isEmpty {
-                            Text("例：以下是繁體中文的語音辨識結果。")
+                            Text("例：以下是普通话语音识别结果。")
                                 .foregroundColor(.secondary.opacity(0.6))
                                 .font(.body)
                                 .padding(.top, 8)
@@ -332,14 +332,14 @@ struct ModelSettingsTab: View {
                                 .allowsHitTesting(false)
                         }
                     }
-                Text("提示詞與自訂詞典合計上限 600 字元，請只保留最關鍵的專名或語境。")
+                Text("提示词与自定义词典合计上限 600 字符，请只保留最关键的专名或语境。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             }
 
-            Section(header: Text("自訂詞典"),
-                    footer: Text("一行一個詞，辨識時自動注入提示詞提升精度（例：專有名詞、品牌名稱、縮寫）")) {
+            Section(header: Text("自定义词典"),
+                    footer: Text("一行一个词，识别时自动注入提示词提升精度（例：专有名词、品牌名称、缩写）")) {
                 TextEditor(text: $dictionaryTerms)
                     .font(.body.monospaced())
                     .frame(height: 80)
@@ -359,11 +359,11 @@ struct ModelSettingsTab: View {
             }
 
             Section {
-                Button("開啟設定與安裝視窗") {
+                Button("打开设置与安装窗口") {
                     SetupWindowController.shared.show()
                 }
                 .buttonStyle(.link)
-                .help("安裝 Python 環境或重新轉換 Breeze-ASR-25")
+                .help("安装 Python 环境")
             }
         }
         .formStyle(.grouped)
@@ -378,16 +378,16 @@ struct HistorySettingsTab: View {
     var body: some View {
         Form {
             Section {
-                Stepper("保留 \(appState.maxHistoryCount) 筆記錄",
+                Stepper("保留 \(appState.maxHistoryCount) 条记录",
                         value: $appState.maxHistoryCount, in: 10...200, step: 10)
-                Button("清除所有歷史", role: .destructive) {
+                Button("清除所有历史", role: .destructive) {
                     appState.clearHistory()
                 }
             }
 
-            Section("最近辨識") {
+            Section("最近识别") {
                 if appState.history.isEmpty {
-                    Text("尚無辨識記錄").foregroundColor(.secondary)
+                    Text("暂无识别记录").foregroundColor(.secondary)
                 } else {
                     List(appState.history.prefix(20)) { entry in
                         VStack(alignment: .leading, spacing: 4) {

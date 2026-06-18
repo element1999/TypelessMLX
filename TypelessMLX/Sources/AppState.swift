@@ -3,15 +3,15 @@ import Combine
 import AVFoundation
 
 enum AppStatus: String {
-    case idle = "待機中"
-    case recording = "錄音中..."
-    case transcribing = "辨識中..."
+    case idle = "待机中"
+    case recording = "录音中..."
+    case transcribing = "识别中..."
 }
 
 enum PermissionState: String {
-    case ready = "🟢 就緒"
-    case missingPermissions = "🟡 缺少權限"
-    case error = "🔴 錯誤"
+    case ready = "🟢 就绪"
+    case missingPermissions = "🟡 缺少权限"
+    case error = "🔴 错误"
 }
 
 struct TranscriptionEntry: Identifiable, Codable {
@@ -51,6 +51,8 @@ class AppState: ObservableObject {
     @Published var hasMicPermission: Bool = false
     @Published var hasAccessibilityPermission: Bool = false
     @Published var hasPythonBackend: Bool = false
+    @Published var hasScreenCapturePermission: Bool = false
+    @Published var isTeamsMeetingActive: Bool = false
 
     // Settings (persisted via AppStorage)
     @AppStorage("selectedModelID") var selectedModelID: String = "macos-speech"
@@ -59,12 +61,13 @@ class AppState: ObservableObject {
     @AppStorage("launchAtLogin") var launchAtLogin: Bool = false
     @AppStorage("hotkeyKeyCode") var hotkeyKeyCode: Int = 61  // Right Option
     @AppStorage("language") var language: String = "auto"
-    @AppStorage("hotkeyMode") var hotkeyMode: String = "toggle"  // "toggle" or "hold"
+    @AppStorage("hotkeyMode") var hotkeyMode: String = "hold"  // "toggle" or "hold"
     @AppStorage("maxHistoryCount") var maxHistoryCount: Int = 50
     @AppStorage("initialPrompt") var initialPrompt: String = ""
     @AppStorage("inputDeviceUID") var inputDeviceUID: String = ""  // empty = system default
     @AppStorage("enableTextRefinement") var enableTextRefinement: Bool = true
     @AppStorage("removeFillers") var removeFillers: Bool = false
+    @AppStorage("meetingSubtitleEnabled") var meetingSubtitleEnabled: Bool = false
     // Live transcription text (set by WhisperBridge progress callbacks)
     @Published var liveTranscriptionConfirmedText: String = ""
     @Published var liveTranscriptionUnconfirmedText: String = ""
@@ -74,31 +77,25 @@ class AppState: ObservableObject {
         MLXModel(
             id: "macos-speech",
             repoOrPath: "",
-            description: "macOS 內建語音辨識（快速、不需下載、不需 Python）",
+            description: "macOS 内置语音识别（快速、无需下载、无需 Python）",
             isLocal: true, modelType: "macos"
         ),
         MLXModel(
             id: "qwen3-asr-0.6b",
             repoOrPath: "mlx-community/Qwen3-ASR-0.6B-8bit",
-            description: "Qwen3-ASR 0.6B（中文精度最佳，~1GB，推薦）",
+            description: "Qwen3-ASR 0.6B（中文精度最佳，~1GB，推荐）",
             isLocal: false, modelType: "qwen3"
-        ),
-        MLXModel(
-            id: "breeze-asr-25",
-            repoOrPath: "schsu/breeze-asr-25-mlx",
-            description: "Breeze-ASR-25（台灣中文優化，MediaTek Research，~1.8GB）",
-            isLocal: false, modelType: "whisper"
         ),
         MLXModel(
             id: "whisper-large-v3",
             repoOrPath: "mlx-community/whisper-large-v3-mlx",
-            description: "Whisper Large v3（多語言，3.1GB，最高精度）",
+            description: "Whisper Large v3（多语言，3.1GB，最高精度）",
             isLocal: false, modelType: "whisper"
         ),
         MLXModel(
             id: "whisper-medium",
             repoOrPath: "mlx-community/whisper-medium-mlx",
-            description: "Whisper Medium（多語言，1.5GB）",
+            description: "Whisper Medium（多语言，1.5GB）",
             isLocal: false, modelType: "whisper"
         ),
         MLXModel(
@@ -116,16 +113,26 @@ class AppState: ObservableObject {
     /// Resolved model path or HF repo for Python backend
     var resolvedModelPath: String {
         let model = selectedModel
-        if model.isLocal {
-            // Check if local conversion exists; if not, fall back to whisper-large-v3
-            if FileManager.default.fileExists(atPath: model.repoOrPath) {
-                return model.repoOrPath
-            } else {
-                logWarn("AppState", "Breeze-ASR-25 local model not found, falling back to whisper-large-v3")
-                return "mlx-community/whisper-large-v3-mlx"
-            }
-        }
+        if model.isLocal { return model.repoOrPath }
+        // Check app bundle Resources/models/<id>/ first (for offline distribution)
+        if let bundled = Self.bundledModelPath(for: model) { return bundled }
         return model.repoOrPath
+    }
+
+    static func bundledModelPath(for model: MLXModel) -> String? {
+        guard let resourcePath = Bundle.main.resourcePath else { return nil }
+        let path = resourcePath + "/models/" + model.id
+        return FileManager.default.fileExists(atPath: path) ? path : nil
+    }
+
+    /// Resolved model path for meeting subtitle — always a Whisper model
+    var resolvedSubtitleModelPath: String {
+        if selectedModel.modelType == "whisper" { return resolvedModelPath }
+        let whisperModels = Self.availableModels.filter { $0.modelType == "whisper" }
+        for m in whisperModels {
+            if let bundled = Self.bundledModelPath(for: m) { return bundled }
+        }
+        return "mlx-community/whisper-large-v3-mlx"
     }
 
     private init() {

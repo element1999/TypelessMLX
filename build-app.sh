@@ -9,34 +9,37 @@ ENTITLEMENTS="$PROJECT_DIR/TypelessMLX/TypelessMLX.entitlements"
 INSTALL_DIR="/Applications/$APP_NAME.app"
 APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/TypelessMLX/Info.plist" 2>/dev/null || echo "0.0.0")
 DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
+
 INSTALL_APP=0
+MODE="dev"        # dev | release
 ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 
 usage() {
     cat <<EOF
-Usage: $0 [--install|-i] [--allow-adhoc]
+Usage: $0 [--dev|--release] [--install|-i] [--allow-adhoc]
+
+Modes:
+  (default)   Dev mode — debug binary, no venv bundle, no DMG. Fast iteration.
+  --release   Release mode — release binary, bundle venv, create DMG + model zips.
+
+Options:
+  --install, -i   Copy app to /Applications and launch after build.
+  --allow-adhoc   Allow ad-hoc signing (dev mode uses ad-hoc automatically).
 
 Environment:
-  SIGN_IDENTITY           Code signing identity to use, for example:
-                          Apple Development: Your Name (TEAMID)
-  ALLOW_ADHOC_SIGNING=1   Allow ad-hoc signing when no identity is available.
-                          Privacy permissions may not persist across rebuilds.
+  SIGN_IDENTITY           Code signing identity, e.g. "Apple Development: You (TEAMID)"
+  ALLOW_ADHOC_SIGNING=1   Same as --allow-adhoc flag.
 EOF
 }
 
 for arg in "$@"; do
     case "$arg" in
-        --install|-i)
-            INSTALL_APP=1
-            ;;
-        --allow-adhoc)
-            ALLOW_ADHOC_SIGNING=1
-            ;;
-        --help|-h)
-            usage
-            exit 0
-            ;;
+        --dev)          MODE="dev" ;;
+        --release)      MODE="release" ;;
+        --install|-i)   INSTALL_APP=1 ;;
+        --allow-adhoc)  ALLOW_ADHOC_SIGNING=1 ;;
+        --help|-h)      usage; exit 0 ;;
         *)
             echo "Unknown argument: $arg" >&2
             usage >&2
@@ -44,6 +47,11 @@ for arg in "$@"; do
             ;;
     esac
 done
+
+# Dev mode always allows ad-hoc signing
+if [ "$MODE" = "dev" ]; then
+    ALLOW_ADHOC_SIGNING=1
+fi
 
 find_default_signing_identity() {
     security find-identity -v -p codesigning 2>/dev/null |
@@ -58,38 +66,45 @@ if [ -z "$SIGN_IDENTITY" ]; then
     SIGN_IDENTITY="$(find_default_signing_identity || true)"
 fi
 
-echo "╔══════════════════════════════════════╗"
-echo "║   TypelessMLX Build v${APP_VERSION}        ║"
-echo "╚══════════════════════════════════════╝"
-echo ""
-
 if [ -z "$SIGN_IDENTITY" ]; then
     if [ "$ALLOW_ADHOC_SIGNING" = "1" ]; then
         SIGN_IDENTITY="-"
-        echo "⚠️  Using ad-hoc signing because ALLOW_ADHOC_SIGNING=1."
-        echo "   Accessibility/Input Monitoring permissions may need re-approval after rebuilds."
     else
         echo "❌ No Apple code signing identity found."
-        echo ""
-        echo "Create an Apple Development certificate in Xcode, then run:"
-        echo "  security find-identity -v -p codesigning"
-        echo "  export SIGN_IDENTITY=\"Apple Development: Your Name (TEAMID)\""
-        echo "  $0 --install"
-        echo ""
-        echo "For disposable builds only:"
-        echo "  ALLOW_ADHOC_SIGNING=1 $0 --install"
+        echo "   Run with --allow-adhoc, or set SIGN_IDENTITY."
         exit 1
     fi
+fi
+
+# ── Header ────────────────────────────────────────────────────────────────────
+echo "╔══════════════════════════════════════╗"
+if [ "$MODE" = "dev" ]; then
+    echo "║   TypelessMLX Dev Build v${APP_VERSION}     ║"
+else
+    echo "║   TypelessMLX Release v${APP_VERSION}       ║"
+fi
+echo "╚══════════════════════════════════════╝"
+echo ""
+if [ "$SIGN_IDENTITY" = "-" ]; then
+    echo "⚠️  Ad-hoc signing (permissions may need re-approval after rebuilds)"
 else
     echo "🔐 Signing identity: $SIGN_IDENTITY"
 fi
+echo ""
 
-# --- Step 1: Build release binary ---
-echo "🔨 Building release binary..."
+# ── Step 1: Build ─────────────────────────────────────────────────────────────
 cd "$PROJECT_DIR"
-swift build -c release 2>&1
+if [ "$MODE" = "dev" ]; then
+    echo "🔨 Building debug binary..."
+    swift build 2>&1
+    BINARY_SRC=".build/debug/TypelessMLX"
+else
+    echo "🔨 Building release binary..."
+    swift build -c release 2>&1
+    BINARY_SRC=".build/release/TypelessMLX"
+fi
 
-# --- Step 2: Create app bundle ---
+# ── Step 2: App bundle ────────────────────────────────────────────────────────
 echo ""
 echo "📦 Creating app bundle..."
 
@@ -97,62 +112,133 @@ rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS"
 mkdir -p "$APP_BUNDLE/Contents/Resources"
 
-# Copy executable
-cp ".build/release/TypelessMLX" "$APP_BUNDLE/Contents/MacOS/TypelessMLX"
-
-# Copy Info.plist
+cp "$BINARY_SRC" "$APP_BUNDLE/Contents/MacOS/TypelessMLX"
 cp "TypelessMLX/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
-# Copy backend Python files
 mkdir -p "$APP_BUNDLE/Contents/Resources/backend"
 cp backend/transcribe_server.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/convert.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/requirements.txt "$APP_BUNDLE/Contents/Resources/backend/"
-echo "  ✅ Python backend bundled"
+echo "  ✅ Python backend copied"
 
-# Copy app icon
-if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
-    cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
-    echo "  ✅ App icon bundled"
+if [ "$MODE" = "release" ]; then
+    VENV_SRC="$HOME/.local/share/typelessmlx/venv"
+    if [ -d "$VENV_SRC" ]; then
+        echo "  📦 Bundling Python venv (resolving symlinks — this takes a while)..."
+        cp -RL "$VENV_SRC" "$APP_BUNDLE/Contents/Resources/venv"
+        echo "  ✅ Venv bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/venv" | awk '{print $1}'))"
+    else
+        echo "  ⚠️  No venv at $VENV_SRC — skipping venv bundle"
+    fi
+else
+    echo "  ℹ️  Dev mode: using system venv at ~/.local/share/typelessmlx/venv"
 fi
 
-# Create PkgInfo
-echo -n "APPL????" > "$APP_BUNDLE/Contents/PkgInfo"
+if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
+    cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+    echo "  ✅ App icon copied"
+fi
 
-# --- Step 3: Code signing ---
+printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
+
+# ── Step 3: Code signing ──────────────────────────────────────────────────────
 echo ""
 echo "🔐 Code signing..."
 codesign --force --deep --sign "$SIGN_IDENTITY" \
+    --identifier "com.typelessmlx.app" \
     --entitlements "$ENTITLEMENTS" \
-    --preserve-metadata=identifier \
     "$APP_BUNDLE" 2>&1
 
-# Verify signature
-codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+codesign --verify --deep --strict "$APP_BUNDLE"
 codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|Signature" || true
-codesign -dr - "$APP_BUNDLE" 2>&1 | sed 's/^/# /' || true
 
-# --- Step 4: Create DMG ---
-echo ""
-echo "💿 Creating DMG..."
-hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$DMG_PATH" 2>&1
-DMG_SIZE=$(du -sh "$DMG_PATH" | awk '{print $1}')
-echo "  ✅ DMG: $DMG_PATH ($DMG_SIZE)"
+# ── Step 4: DMG + model archives (release only) ───────────────────────────────
+if [ "$MODE" = "release" ]; then
+    echo ""
+    echo "💿 Creating DMG..."
+    hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$DMG_PATH" 2>&1
+    DMG_SIZE=$(du -sh "$DMG_PATH" | awk '{print $1}')
+    echo "  ✅ DMG: $DMG_PATH ($DMG_SIZE)"
 
-# --- Step 5: Report ---
+    echo ""
+    echo "📦 Packaging model archives..."
+    HF_CACHE="$HOME/.cache/huggingface/hub"
+
+    package_model_archive() {
+        local model_id="$1" repo="$2"
+        local escaped_repo
+        escaped_repo=$(echo "$repo" | sed 's|/|--|g')
+        local cache_dir="$HF_CACHE/models--$escaped_repo"
+        local snapshot_dir
+        snapshot_dir=$(ls -td "$cache_dir/snapshots"/*/ 2>/dev/null | head -1)
+        if [ -z "$snapshot_dir" ] || [ ! -d "$snapshot_dir" ]; then
+            echo "  ⚠️  跳过 $model_id（本地未缓存）"
+            return 0
+        fi
+
+        local snapshot_hash
+        snapshot_hash=$(basename "${snapshot_dir%/}")
+        local staging="$BUILD_DIR/${model_id}-staging"
+        local archive="$BUILD_DIR/${model_id}-model.zip"
+
+        rm -rf "$staging"
+        mkdir -p "$staging/model"
+
+        echo "  复制 $model_id 模型文件..."
+        (cd "${snapshot_dir%/}" && cp -RL . "$staging/model/")
+
+        local escaped_repo_val="$escaped_repo"
+        local snapshot_hash_val="$snapshot_hash"
+        local model_id_val="$model_id"
+
+        cat > "$staging/install.sh" << INSTALL_EOF
+#!/bin/bash
+set -e
+SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+SNAPSHOT_HASH="${snapshot_hash_val}"
+CACHE_DIR="\$HOME/.cache/huggingface/hub/models--${escaped_repo_val}"
+SNAPSHOT_DIR="\$CACHE_DIR/snapshots/\$SNAPSHOT_HASH"
+
+echo "📦 正在安装模型: ${model_id_val}..."
+mkdir -p "\$SNAPSHOT_DIR"
+mkdir -p "\$CACHE_DIR/refs"
+echo "  复制模型文件..."
+cp -r "\$SCRIPT_DIR/model/." "\$SNAPSHOT_DIR/"
+printf '%s' "\$SNAPSHOT_HASH" > "\$CACHE_DIR/refs/main"
+echo "✅ 安装完成: \$SNAPSHOT_DIR"
+echo "   重启 TypelessMLX 后，在设置中选择对应模型即可使用。"
+INSTALL_EOF
+
+        chmod +x "$staging/install.sh"
+        echo "  压缩打包中..."
+        (cd "$staging" && zip -r "$archive" . -x "*.DS_Store" > /dev/null)
+        rm -rf "$staging"
+
+        local size
+        size=$(du -sh "$archive" | awk '{print $1}')
+        echo "  ✅ $(basename "$archive") ($size)"
+    }
+
+    package_model_archive "qwen3-asr-0.6b"  "mlx-community/Qwen3-ASR-0.6B-8bit"
+    package_model_archive "whisper-large-v3" "mlx-community/whisper-large-v3-mlx"
+    package_model_archive "whisper-medium"   "mlx-community/whisper-medium-mlx"
+    package_model_archive "whisper-small"    "mlx-community/whisper-small-mlx"
+fi
+
+# ── Step 5: Report ────────────────────────────────────────────────────────────
 echo ""
 APP_SIZE=$(du -sh "$APP_BUNDLE" | awk '{print $1}')
 BINARY_SIZE=$(du -sh "$APP_BUNDLE/Contents/MacOS/TypelessMLX" | awk '{print $1}')
 echo "═══════════════════════════════════════"
-echo "  ✅ Build complete! v${APP_VERSION}"
+echo "  ✅ Build complete! v${APP_VERSION} [${MODE}]"
 echo "  📍 $APP_BUNDLE"
-echo "  💿 $DMG_PATH"
-echo "  📏 App size: $APP_SIZE"
-echo "  📏 Binary: $BINARY_SIZE"
-echo "  📏 DMG: $DMG_SIZE"
+echo "  📏 App size: $APP_SIZE  Binary: $BINARY_SIZE"
+if [ "$MODE" = "release" ]; then
+    echo "  💿 $DMG_PATH ($DMG_SIZE)"
+fi
 echo "═══════════════════════════════════════"
 
-# --- Step 6: Install (optional) ---
+# ── Step 6: Install ───────────────────────────────────────────────────────────
 if [ "$INSTALL_APP" = "1" ]; then
     echo ""
     echo "📲 Installing to /Applications..."
@@ -166,15 +252,16 @@ if [ "$INSTALL_APP" = "1" ]; then
     open "$INSTALL_DIR"
 else
     echo ""
-    echo "To install: $0 --install"
-    echo "To run:     open \"$APP_BUNDLE\""
+    echo "To install:  $0 --install"
+    echo "To run:      open \"$APP_BUNDLE\""
 fi
 
-echo ""
-echo "⚠️  首次使用注意事項："
-echo "  1. 授權麥克風存取（系統設定 → 隱私權 → 麥克風）"
-echo "  2. 授權輔助使用（系統設定 → 隱私權 → 輔助使用）"
-echo "  3. 授權輸入監控（系統設定 → 隱私權 → 輸入監控）"
-echo "  4. App 啟動後會自動顯示設定視窗，安裝 Python 環境"
-echo "  5. 下載並轉換 Breeze-ASR-25 模型（約 10-20 分鐘）"
-echo "  6. 完成後按 Right Option 即可開始錄音"
+if [ "$MODE" = "release" ]; then
+    echo ""
+    echo "⚠️  首次使用注意事项："
+    echo "  1. 授权麦克风访问（系统设置 → 隐私与安全 → 麦克风）"
+    echo "  2. 授权辅助功能（系统设置 → 隐私与安全 → 辅助功能）"
+    echo "  3. 授权输入监控（系统设置 → 隐私与安全 → 输入监控）"
+    echo "  4. App 启动后会自动显示设置窗口，点击"开始安装"复制 Python 环境"
+    echo "  5. 完成后按 Right Option 即可开始录音"
+fi

@@ -28,6 +28,7 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("UserNotifications"),
+                .linkedFramework("ScreenCaptureKit"),
                 .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "FoundationModels"])
             ]
         ),

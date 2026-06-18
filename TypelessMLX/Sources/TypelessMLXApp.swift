@@ -45,6 +45,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup hotkey (works even before permissions are fully granted)
         HotkeyManager.shared.setup(appState: appState)
 
+        // Setup meeting subtitle engine
+        MeetingCaptureEngine.shared.setup(appState: appState)
+
         // Periodically re-check permissions
         permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.recheckPermissions()
@@ -58,6 +61,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logInfo("App", "TypelessMLX shutting down")
         AudioRecorder.shared.forceReset()
         WhisperBridge.shared.stopProcess()
+        MeetingCaptureEngine.shared.stop()
     }
 
     private func installCrashHandler() {
@@ -80,13 +84,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                     self.appState.hasMicPermission = granted
                     self.appState.updatePermissionState()
                     if !granted {
-                        self.appState.showError("麥克風存取被拒絕。請前往系統設定 → 隱私權 → 麥克風 啟用。")
+                        self.appState.showError("麦克风访问被拒绝。请前往系统设置 → 隐私与安全性 → 麦克风 启用。")
                     }
                 }
             }
         case .denied, .restricted:
             appState.hasMicPermission = false
-            appState.showError("麥克風存取被拒絕。請前往系統設定 → 隱私權 → 麥克風 啟用。")
+            appState.showError("麦克风访问被拒绝。请前往系统设置 → 隐私与安全性 → 麦克风 启用。")
         case .authorized:
             appState.hasMicPermission = true
         @unknown default:
@@ -112,6 +116,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.appState.hasAccessibilityPermission = ax
             self.appState.hasMicPermission = mic
             if changed { self.appState.updatePermissionState() }
+
+            // If subtitle is enabled but stream not active, retry (e.g. after granting screen capture)
+            if self.appState.meetingSubtitleEnabled && !self.appState.isTeamsMeetingActive {
+                MeetingCaptureEngine.shared.setEnabled(true)
+            }
         }
     }
 
@@ -144,20 +153,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func showAccessibilityAlert() {
         DispatchQueue.main.async {
             let alert = NSAlert()
-            alert.messageText = "需要輔助使用權限"
+            alert.messageText = "需要辅助功能权限"
             alert.informativeText = """
-            TypelessMLX 需要輔助使用權限，才能將辨識文字貼入其他應用程式。
+            TypelessMLX 需要辅助功能权限，才能将识别文字粘贴到其他应用程序。
 
-            請點擊「開啟設定」：
-            1. 點擊 + 按鈕
-            2. 選擇 TypelessMLX.app 並加入
-            3. 開啟開關
+            请点击「打开设置」：
+            1. 点击 + 按钮
+            2. 选择 TypelessMLX.app 并添加
+            3. 开启开关
 
-            授權後可能需要重新啟動 TypelessMLX。
+            授权后可能需要重新启动 TypelessMLX。
             """
             alert.alertStyle = .warning
-            alert.addButton(withTitle: "開啟設定")
-            alert.addButton(withTitle: "稍後再說")
+            alert.addButton(withTitle: "打开设置")
+            alert.addButton(withTitle: "稍后再说")
             NSApp.activate(ignoringOtherApps: true)
             let response = alert.runModal()
             if response == .alertFirstButtonReturn {

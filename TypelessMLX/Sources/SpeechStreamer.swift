@@ -5,7 +5,7 @@ import AVFoundation
 /// Serves two purposes:
 /// 1. **Live preview**: streams partial SFSpeechRecognizer results to RecordingOverlay
 ///    during any recording session (Breeze / Qwen3 / macOS model).
-/// 2. **Standalone model**: final transcription when user picks "macOS 內建" ASR.
+/// 2. **Standalone model**: final transcription when user picks "macOS 内置" ASR.
 class SpeechStreamer {
     static let shared = SpeechStreamer()
 
@@ -102,7 +102,7 @@ class SpeechStreamer {
         let locale = Self.locale(for: language)
         guard let rec = SFSpeechRecognizer(locale: locale), rec.isAvailable else {
             let err = NSError(domain: "SpeechStreamer", code: -1,
-                              userInfo: [NSLocalizedDescriptionKey: "macOS 語音辨識不可用（\(locale.identifier)）"])
+                              userInfo: [NSLocalizedDescriptionKey: "macOS 语音识别不可用（\(locale.identifier)）"])
             completion(.failure(err))
             return
         }
@@ -131,11 +131,11 @@ class SpeechStreamer {
 
     static func locale(for language: String?) -> Locale {
         switch language {
-        case "zh": return Locale(identifier: "zh-TW")
+        case "zh": return Locale(identifier: "zh-CN")
         case "en": return Locale(identifier: "en-US")
         case "ja": return Locale(identifier: "ja-JP")
         case "ko": return Locale(identifier: "ko-KR")
-        default:   return Locale(identifier: "zh-TW")
+        default:   return Locale(identifier: "zh-CN")
         }
     }
 }

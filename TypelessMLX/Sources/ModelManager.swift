@@ -30,7 +30,8 @@ class ModelManager: ObservableObject {
     }
 
     func isCached(_ model: MLXModel) -> Bool {
-        (cachedSizes[model.id] ?? 0) > 0
+        if AppState.bundledModelPath(for: model) != nil { return true }
+        return (cachedSizes[model.id] ?? 0) > 0
     }
 
     /// Human-readable size string, e.g. "1.2 GB"
@@ -47,11 +48,11 @@ class ModelManager: ObservableObject {
 
     func download(_ model: MLXModel) {
         guard downloadingModelID == nil else { return }
-        guard !model.isLocal else { return }  // local models (breeze) use SetupWindowController
+        guard !model.isLocal else { return }  // local models use SetupWindowController
 
         DispatchQueue.main.async {
             self.downloadingModelID = model.id
-            self.downloadStatusText = "連線中..."
+            self.downloadStatusText = "连接中..."
             self.downloadError = nil
         }
         logInfo("ModelManager", "Starting download: \(model.repoOrPath)")
@@ -85,11 +86,11 @@ sys.stdout.flush()
                     if text.contains("Fetching") || text.contains("Downloading") {
                         let status: String
                         if let range = text.range(of: #"(\d+)/(\d+)"#, options: .regularExpression) {
-                            status = "下載中 \(text[range]) 個檔案..."
+                            status = "下载中 \(text[range]) 个文件..."
                         } else if text.contains("%") {
-                            status = "下載中..."
+                            status = "下载中..."
                         } else {
-                            status = "下載中..."
+                            status = "下载中..."
                         }
                         DispatchQueue.main.async { self?.downloadStatusText = status }
                     }
@@ -116,7 +117,7 @@ sys.stdout.flush()
                 self.downloadStatusText = ""
                 self.downloadProcess = nil
                 self.cachedSizes[model.id] = size
-                self.downloadError = success ? nil : "下載失敗：\(model.id)"
+                self.downloadError = success ? nil : "下载失败：\(model.id)"
             }
         }
     }

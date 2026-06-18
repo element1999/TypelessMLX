@@ -54,8 +54,18 @@ class WhisperBridge {
     }
 
     static func isVenvReady() -> Bool {
-        let python = NSHomeDirectory() + "/.local/share/typelessmlx/venv/bin/python"
-        return FileManager.default.fileExists(atPath: python)
+        let venvBin = NSHomeDirectory() + "/.local/share/typelessmlx/venv/bin"
+        let python = venvBin + "/python"
+        guard FileManager.default.fileExists(atPath: python) else { return false }
+        // Verify that key packages are actually installed
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: python)
+        proc.arguments = ["-c", "import mlx_whisper, mlx_audio, huggingface_hub"]
+        proc.standardOutput = FileHandle.nullDevice
+        proc.standardError = FileHandle.nullDevice
+        try? proc.run()
+        proc.waitUntilExit()
+        return proc.terminationStatus == 0
     }
 
     // MARK: - Lifecycle
@@ -276,6 +286,15 @@ class WhisperBridge {
         let elapsed = Date().timeIntervalSince(context.startTime)
         logInfo("WhisperBridge", "\(context.label) latency: \(String(format: "%.2f", elapsed))s")
 
+        // Subtitle response: encode english\u{0001}chinese for caller to unpack
+        if let _ = json["translated"] {
+            let english = json["text"] as? String ?? ""
+            let chinese = json["translated"] as? String ?? ""
+            let encoded = "\(english)\u{0001}\(chinese)"
+            DispatchQueue.main.async { context.completion(.success(encoded)) }
+            return
+        }
+
         if let errorMsg = json["error"] as? String, !errorMsg.isEmpty {
             let err = NSError(domain: "WhisperBridge", code: -2,
                               userInfo: [NSLocalizedDescriptionKey: errorMsg])
@@ -301,6 +320,45 @@ class WhisperBridge {
     }
 
     // MARK: - Transcription
+
+    func transcribeForSubtitle(audioURL: URL, model: String?,
+                                completion: @escaping (Result<(english: String, chinese: String), Error>) -> Void) {
+        lock.lock()
+        guard isReady else {
+            lock.unlock()
+            let err = NSError(domain: "WhisperBridge", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "Python backend not ready"])
+            completion(.failure(err))
+            return
+        }
+        lock.unlock()
+
+        resetIdleTimer()
+
+        var request: [String: Any] = [
+            "action": "subtitle",
+            "audio_path": audioURL.path,
+            "model_type": "whisper"
+        ]
+        if let model = model, !model.isEmpty { request["model"] = model }
+
+        // Wrap tuple completion using \u{0001} delimiter internally
+        let wrapped: (Result<String, Error>) -> Void = { result in
+            switch result {
+            case .success(let encoded):
+                let parts = encoded.components(separatedBy: "\u{0001}")
+                if parts.count == 2 {
+                    completion(.success((english: parts[0], chinese: parts[1])))
+                } else {
+                    completion(.success((english: encoded, chinese: "")))
+                }
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+
+        queueRequest(payload: request, timeout: 180.0, label: "Subtitle", completion: wrapped)
+    }
 
     func transcribe(audioURL: URL, model: String?, language: String?,
                     completion: @escaping (Result<String, Error>) -> Void) {
@@ -476,6 +534,8 @@ class WhisperBridge {
         env["PATH"] = (paths + [(env["PATH"] ?? "")]).joined(separator: ":")
         env["HF_HOME"] = NSHomeDirectory() + "/.cache/huggingface"
         env["PYTHONUNBUFFERED"] = "1"
+        env["HF_HUB_OFFLINE"] = "0"  // override shell setting; downloads must be allowed
+        env.removeValue(forKey: "HF_ENDPOINT")  // use huggingface.co directly; mirrors cause redirect issues
         return env
     }
 }

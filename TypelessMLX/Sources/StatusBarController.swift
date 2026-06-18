@@ -41,6 +41,11 @@ class StatusBarController {
             .sink { [weak self] _ in self?.updateMenu() }
             .store(in: &cancellables)
 
+        appState.$isTeamsMeetingActive
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.updateMenu() }
+            .store(in: &cancellables)
+
         appState.$errorMessage
             .compactMap { $0 }
             .receive(on: DispatchQueue.main)
@@ -54,15 +59,15 @@ class StatusBarController {
         guard let button = statusItem.button else { return }
         switch status {
         case .idle:
-            button.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "TypelessMLX - 待機")
+            button.image = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "TypelessMLX - 待机")
             button.image?.isTemplate = true
             button.contentTintColor = nil
         case .recording:
-            button.image = NSImage(systemSymbolName: "mic.circle.fill", accessibilityDescription: "TypelessMLX - 錄音中")
+            button.image = NSImage(systemSymbolName: "mic.circle.fill", accessibilityDescription: "TypelessMLX - 录音中")
             button.image?.isTemplate = false
             button.contentTintColor = .systemRed
         case .transcribing:
-            button.image = NSImage(systemSymbolName: "ellipsis.circle.fill", accessibilityDescription: "TypelessMLX - 辨識中")
+            button.image = NSImage(systemSymbolName: "ellipsis.circle.fill", accessibilityDescription: "TypelessMLX - 识别中")
             button.image?.isTemplate = false
             button.contentTintColor = .systemOrange
         }
@@ -78,17 +83,17 @@ class StatusBarController {
 
         if appState.permissionState != .ready {
             if !appState.hasMicPermission {
-                let item = NSMenuItem(title: "  ⚠️ 麥克風：未授權", action: nil, keyEquivalent: "")
+                let item = NSMenuItem(title: "  ⚠️ 麦克风：未授权", action: nil, keyEquivalent: "")
                 item.isEnabled = false
                 menu.addItem(item)
             }
             if !appState.hasAccessibilityPermission {
-                let item = NSMenuItem(title: "  ⚠️ 輔助使用：未授權", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+                let item = NSMenuItem(title: "  ⚠️ 辅助功能：未授权", action: #selector(openAccessibilitySettings), keyEquivalent: "")
                 item.target = self
                 menu.addItem(item)
             }
             if !appState.hasPythonBackend {
-                let item = NSMenuItem(title: "  ⚠️ Python 後端：未就緒", action: #selector(showSetup), keyEquivalent: "")
+                let item = NSMenuItem(title: "  ⚠️ Python 后端：未就绪", action: #selector(showSetup), keyEquivalent: "")
                 item.target = self
                 menu.addItem(item)
             }
@@ -107,7 +112,7 @@ class StatusBarController {
         menu.addItem(statusItem)
 
         // Hotkey hint
-        let modeText = appState.hotkeyMode == "hold" ? "按住錄音" : "按一下切換錄音"
+        let modeText = appState.hotkeyMode == "hold" ? "按住录音" : "点击切换录音"
         let hintItem = NSMenuItem(title: "Right ⌥ Option → \(modeText)", action: nil, keyEquivalent: "")
         hintItem.isEnabled = false
         menu.addItem(hintItem)
@@ -124,26 +129,61 @@ class StatusBarController {
 
         menu.addItem(NSMenuItem.separator())
 
+        // Meeting subtitle section
+        let subtitleHeader = NSMenuItem(title: "会议字幕（Teams）", action: nil, keyEquivalent: "")
+        subtitleHeader.isEnabled = false
+        menu.addItem(subtitleHeader)
+
+        let subtitleToggleTitle = appState.meetingSubtitleEnabled ? "  停止会议字幕" : "  开始会议字幕"
+        let subtitleToggleItem = NSMenuItem(title: subtitleToggleTitle, action: #selector(toggleMeetingSubtitle), keyEquivalent: "")
+        subtitleToggleItem.target = self
+        menu.addItem(subtitleToggleItem)
+
+        if appState.meetingSubtitleEnabled {
+            if !appState.hasScreenCapturePermission {
+                let permItem = NSMenuItem(title: "  ⚠️ 需要屏幕录制权限", action: #selector(openScreenCaptureSettings), keyEquivalent: "")
+                permItem.target = self
+                menu.addItem(permItem)
+            } else {
+                let captureState = appState.isTeamsMeetingActive ? "  ● 正在捕获 Teams 音频" : "  ○ 等待 Teams 启动..."
+                let captureItem = NSMenuItem(title: captureState, action: nil, keyEquivalent: "")
+                captureItem.isEnabled = false
+                menu.addItem(captureItem)
+            }
+        }
+
+        menu.addItem(NSMenuItem.separator())
+
         // Setup / Settings
-        let setupItem = NSMenuItem(title: "設定與安裝...", action: #selector(showSetup), keyEquivalent: "")
+        let setupItem = NSMenuItem(title: "设置与安装...", action: #selector(showSetup), keyEquivalent: "")
         setupItem.target = self
         menu.addItem(setupItem)
 
-        let settingsItem = NSMenuItem(title: "偏好設定...", action: #selector(openSettings), keyEquivalent: ",")
+        let settingsItem = NSMenuItem(title: "偏好设置...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
 
-        let refreshItem = NSMenuItem(title: "重新整理權限", action: #selector(refreshPermissions), keyEquivalent: "r")
+        let refreshItem = NSMenuItem(title: "刷新权限", action: #selector(refreshPermissions), keyEquivalent: "r")
         refreshItem.target = self
         menu.addItem(refreshItem)
 
         menu.addItem(NSMenuItem.separator())
 
-        let quitItem = NSMenuItem(title: "結束 TypelessMLX", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "退出 TypelessMLX", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
+    }
+
+    @objc private func toggleMeetingSubtitle() {
+        appState.meetingSubtitleEnabled.toggle()
+        MeetingCaptureEngine.shared.setEnabled(appState.meetingSubtitleEnabled)
+        updateMenu()
+    }
+
+    @objc private func openScreenCaptureSettings() {
+        NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")!)
     }
 
     @objc private func openAccessibilitySettings() {
@@ -158,7 +198,7 @@ class StatusBarController {
         guard let last = appState.history.first else { return }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(last.text, forType: .string)
-        showNotification(title: "已複製", body: String(last.text.prefix(50)))
+        showNotification(title: "已复制", body: String(last.text.prefix(50)))
     }
 
     @objc private func openSettings() {
@@ -207,7 +247,7 @@ class SettingsWindowController: NSObject, NSWindowDelegate {
             backing: .buffered,
             defer: false
         )
-        win.title = "TypelessMLX 偏好設定"
+        win.title = "TypelessMLX 偏好设置"
         win.contentView = hostingView
         win.center()
         win.isReleasedWhenClosed = false

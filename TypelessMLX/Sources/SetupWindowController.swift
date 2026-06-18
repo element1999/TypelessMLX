@@ -27,7 +27,7 @@ class SetupWindowController: NSObject {
             backing: .buffered,
             defer: false
         )
-        win.title = "TypelessMLX 設定"
+        win.title = "TypelessMLX 设置"
         win.contentView = hostingView
         win.center()
         win.isReleasedWhenClosed = false
@@ -83,22 +83,37 @@ class SetupViewModel: ObservableObject {
             // Step 1: Create Python venv
             if !WhisperBridge.isVenvReady() {
                 DispatchQueue.main.async { self.venvStatus = .running }
-                self.appendLog("🔧 建立 Python 虛擬環境...")
-                if self.createVenv() {
-                    DispatchQueue.main.async { self.venvStatus = .done }
-                    self.appendLog("✅ Python 虛擬環境建立完成")
+                let installed: Bool
+                if let bundledVenv = Bundle.main.path(forResource: "venv", ofType: nil) {
+                    self.appendLog("📦 从应用包复制 Python 虚拟环境...")
+                    installed = self.installBundledVenv(bundledVenv)
+                    if installed {
+                        self.appendLog("✅ Python 虚拟环境安装完成")
+                    } else {
+                        self.appendLog("❌ 复制虚拟环境失败")
+                    }
                 } else {
-                    DispatchQueue.main.async { self.venvStatus = .failed("建立失敗") }
-                    self.appendLog("❌ Python 虛擬環境建立失敗，請確認已安裝 uv")
+                    self.appendLog("🔧 创建 Python 虚拟环境...")
+                    installed = self.createVenv()
+                    if installed {
+                        self.appendLog("✅ Python 虚拟环境创建完成")
+                    } else {
+                        self.appendLog("❌ Python 虚拟环境创建失败，请确认已安装 uv")
+                    }
+                }
+                if installed {
+                    DispatchQueue.main.async { self.venvStatus = .done }
+                } else {
+                    DispatchQueue.main.async { self.venvStatus = .failed("安装失败") }
                     DispatchQueue.main.async { self.isRunning = false }
                     return
                 }
             } else {
-                self.appendLog("✅ Python 虛擬環境已存在")
+                self.appendLog("✅ Python 虚拟环境已存在")
             }
 
             self.appendLog("")
-            self.appendLog("🎉 設定完成！請按 Right Option 開始錄音。")
+            self.appendLog("🎉 设置完成！按 Right Option 开始录音。")
 
             DispatchQueue.main.async {
                 self.isRunning = false
@@ -117,6 +132,23 @@ class SetupViewModel: ObservableObject {
         }
     }
 
+    private func installBundledVenv(_ bundledVenvPath: String) -> Bool {
+        let dest = NSHomeDirectory() + "/.local/share/typelessmlx/venv"
+        let fm = FileManager.default
+        let destParent = (dest as NSString).deletingLastPathComponent
+        do {
+            try fm.createDirectory(atPath: destParent, withIntermediateDirectories: true)
+            if fm.fileExists(atPath: dest) {
+                try fm.removeItem(atPath: dest)
+            }
+            try fm.copyItem(atPath: bundledVenvPath, toPath: dest)
+            return WhisperBridge.isVenvReady()
+        } catch {
+            appendLog("   复制失败: \(error.localizedDescription)")
+            return false
+        }
+    }
+
     private func createVenv() -> Bool {
         // First try: uv
         let venvPath = NSHomeDirectory() + "/.local/share/typelessmlx/venv"
@@ -124,11 +156,11 @@ class SetupViewModel: ObservableObject {
 
         for uvPath in ["/opt/homebrew/bin/uv", "/usr/local/bin/uv", "uv"] {
             if let uvURL = findExecutable(uvPath) {
-                appendLog("   使用 uv 建立 venv: \(uvURL.path)")
+                appendLog("   使用 uv 创建 venv: \(uvURL.path)")
                 let result = runCommand(uvURL.path, args: ["venv", venvPath, "--python", "3.12"],
                                         env: WhisperBridge.makeEnv())
                 if result {
-                    appendLog("   安裝 Python 套件...")
+                    appendLog("   安装 Python 包...")
                     let python = venvPath + "/bin/python"
                     let installResult = runCommand(uvURL.path,
                                                    args: ["pip", "install", "-p", python, "-r", requirementsPath ?? "requirements.txt"],
@@ -139,7 +171,7 @@ class SetupViewModel: ObservableObject {
         }
 
         // Fallback: python3 -m venv
-        appendLog("   uv 未找到，嘗試 python3 -m venv...")
+        appendLog("   未找到 uv，尝试 python3 -m venv...")
         for pyPath in ["/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3", "/usr/bin/python3"] {
             if FileManager.default.fileExists(atPath: pyPath) {
                 let venvResult = runCommand(pyPath, args: ["-m", "venv", venvPath], env: WhisperBridge.makeEnv())
@@ -215,7 +247,7 @@ class SetupViewModel: ObservableObject {
             errPipe.fileHandleForReading.readabilityHandler = nil
             return process.terminationStatus == 0
         } catch {
-            appendLog("   執行失敗: \(error)")
+            appendLog("   执行失败: \(error)")
             return false
         }
     }
@@ -250,9 +282,9 @@ struct SetupView: View {
                     .font(.system(size: 28))
                     .foregroundColor(.accentColor)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("TypelessMLX 設定")
+                    Text("TypelessMLX 设置")
                         .font(.title2.bold())
-                    Text("設定 Python 環境（語音模型將在首次選用時自動下載）")
+                    Text("配置 Python 环境（语音模型在首次使用时自动下载）")
                         .font(.subheadline)
                         .foregroundColor(.secondary)
                 }
@@ -263,15 +295,15 @@ struct SetupView: View {
             // Steps
             VStack(spacing: 8) {
                 stepRow(icon: "python.circle.fill",
-                        title: "Python 虛擬環境",
-                        subtitle: "安裝 mlx-whisper 及相依套件",
+                        title: "Python 虚拟环境",
+                        subtitle: "安装 mlx-whisper 及依赖包",
                         status: viewModel.venvStatus)
             }
             .padding(.horizontal)
 
             // Log
             VStack(alignment: .leading, spacing: 4) {
-                Text("安裝日誌")
+                Text("安装日志")
                     .font(.caption.bold())
                     .foregroundColor(.secondary)
 
@@ -303,7 +335,7 @@ struct SetupView: View {
 
             // Buttons
             HStack {
-                Button("重新檢查") { viewModel.checkAll() }
+                Button("重新检查") { viewModel.checkAll() }
                     .disabled(viewModel.isRunning)
 
                 Spacer()
@@ -312,11 +344,11 @@ struct SetupView: View {
                     ProgressView().controlSize(.small).padding(.trailing, 8)
                 }
 
-                Button("開始安裝") { viewModel.runSetup() }
+                Button("开始安装") { viewModel.runSetup() }
                     .buttonStyle(.borderedProminent)
                     .disabled(viewModel.isRunning)
 
-                Button("關閉") { SetupWindowController.shared.close() }
+                Button("关闭") { SetupWindowController.shared.close() }
             }
             .padding(.horizontal)
         }
@@ -353,17 +385,17 @@ struct SetupView: View {
     @ViewBuilder
     private func statusLabel(status: SetupViewModel.StepStatus) -> some View {
         switch status {
-        case .unknown: Text("未檢查").font(.caption).foregroundColor(.gray)
-        case .running: Text("進行中...").font(.caption).foregroundColor(.orange)
+        case .unknown: Text("未检查").font(.caption).foregroundColor(.gray)
+        case .running: Text("进行中...").font(.caption).foregroundColor(.orange)
         case .done: Text("完成").font(.caption).foregroundColor(.green)
-        case .failed(let msg): Text("失敗").font(.caption).foregroundColor(.red).help(msg)
+        case .failed(let msg): Text("失败").font(.caption).foregroundColor(.red).help(msg)
         }
     }
 
     private func logColor(for line: String) -> Color {
         if line.contains("✅") || line.contains("🎉") { return .green }
         if line.contains("❌") { return .red }
-        if line.contains("⚠️") || line.contains("失敗") { return .orange }
+        if line.contains("⚠️") || line.contains("失败") { return .orange }
         if line.contains("🔧") || line.contains("🔄") { return .blue }
         return .primary
     }
