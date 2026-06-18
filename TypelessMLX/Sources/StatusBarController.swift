@@ -7,7 +7,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem
     private var appState: AppState
     private var cancellables = Set<AnyCancellable>()
-    private var pendingLookupText: String?
+    private var pendingSelectedText: String?
 
     init(appState: AppState) {
         self.appState = appState
@@ -123,6 +123,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         translateItem.target = self
         menu.addItem(translateItem)
 
+        let translateSentenceItem = NSMenuItem(title: "翻译整句  (⌃⌥T)", action: #selector(translateSentence), keyEquivalent: "")
+        translateSentenceItem.target = self
+        menu.addItem(translateSentenceItem)
+
         // Last transcription
         if let lastEntry = appState.history.first {
             menu.addItem(NSMenuItem.separator())
@@ -186,8 +190,8 @@ class StatusBarController: NSObject, NSMenuDelegate {
     // MARK: - NSMenuDelegate
 
     func menuWillOpen(_ menu: NSMenu) {
-        pendingLookupText = captureSelectedText()
-        logInfo("StatusBar", "menuWillOpen, capturedText=\(pendingLookupText?.prefix(30) ?? "nil")")
+        pendingSelectedText = captureSelectedText()
+        logInfo("StatusBar", "menuWillOpen, capturedText=\(pendingSelectedText?.prefix(30) ?? "nil")")
     }
 
     private func captureSelectedText() -> String? {
@@ -204,11 +208,20 @@ class StatusBarController: NSObject, NSMenuDelegate {
     }
 
     @objc private func translateSelectedText() {
-        if let text = pendingLookupText {
-            pendingLookupText = nil
+        if let text = pendingSelectedText {
+            pendingSelectedText = nil
             LookupManager.shared.lookupText(text)
         } else {
             LookupManager.shared.lookup()
+        }
+    }
+
+    @objc private func translateSentence() {
+        if let text = pendingSelectedText {
+            pendingSelectedText = nil
+            TranslateManager.shared.translateText(text)
+        } else {
+            TranslateManager.shared.translate()
         }
     }
 

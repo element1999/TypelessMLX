@@ -259,7 +259,37 @@ def resolve_model(requested: str | None) -> str:
     return FALLBACK_MODEL
 
 
-def lookup_word_llm(text: str) -> str:
+def translate_to_english_llm(text: str) -> str:
+    if not text.strip() or not _llm_translator_ready:
+        return ""
+    try:
+        from mlx_lm import generate
+        messages = [
+            {"role": "system", "content": "You are a translator. Translate the Chinese text to natural, fluent English. Output only the translation, no explanations."},
+            {"role": "user", "content": text},
+        ]
+        tok = _llm_translator_tokenizer
+        if hasattr(tok, "apply_chat_template"):
+            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            prompt = f"Translate to English: {text}"
+        result = generate(_llm_translator_model, tok, prompt=prompt, max_tokens=300, verbose=False)
+        result = result.strip()
+        sys.stderr.write(f"[TypelessMLX] translate_to_english result: {repr(result[:80])}\n")
+        sys.stderr.flush()
+        # Reject if result still has too many CJK characters
+        if result and sum(1 for c in result if '一' <= c <= '鿿') / max(len(result), 1) > 0.3:
+            sys.stderr.write("[TypelessMLX] translate_to_english: result not English, discarding\n")
+            sys.stderr.flush()
+            return ""
+        return result
+    except Exception as e:
+        sys.stderr.write(f"[TypelessMLX] translate_to_english failed: {e}\n")
+        sys.stderr.flush()
+        return ""
+
+
+
     """Generate a dictionary-style entry using the LLM."""
     if not text.strip() or not _llm_translator_ready:
         return ""
@@ -403,9 +433,19 @@ def main():
                 if not text.strip():
                     send({"id": req_id, "text": "", "error": None})
                     continue
-                translated = translate_to_chinese_llm(text)
-                if not translated:
-                    translated = translate_to_chinese(text)
+                # Auto-detect direction: >30% CJK → Chinese→English, else English→Chinese
+                cjk = sum(1 for c in text if '一' <= c <= '鿿')
+                is_chinese = cjk / max(len(text.strip()), 1) > 0.3
+                if is_chinese:
+                    sys.stderr.write(f"[TypelessMLX] translate: ZH→EN\n")
+                    sys.stderr.flush()
+                    translated = translate_to_english_llm(text)
+                else:
+                    sys.stderr.write(f"[TypelessMLX] translate: EN→ZH\n")
+                    sys.stderr.flush()
+                    translated = translate_to_chinese_llm(text)
+                    if not translated:
+                        translated = translate_to_chinese(text)
                 send({"id": req_id, "text": translated, "error": None})
 
             elif action == "lookup":
