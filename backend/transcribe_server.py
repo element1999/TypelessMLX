@@ -104,13 +104,55 @@ def translate_to_chinese_llm(text: str) -> str:
         return ""
 
 
+def lookup_word_llm(text: str) -> str:
+    """Return a concise dictionary-style entry for a word or phrase using the LLM."""
+    if not text.strip() or not _llm_translator_ready:
+        return ""
+    try:
+        from mlx_lm import generate
+        messages = [
+            {"role": "system", "content": (
+                "You are a bilingual dictionary. For the given word or phrase, output a concise entry in this exact format:\n"
+                "Line 1: part of speech + English definition (max 15 words)\n"
+                "Line 2: Chinese translation or explanation (max 10 Chinese characters)\n"
+                "Example for 'ephemeral':\n"
+                "adj. lasting for a very short time\n"
+                "短暂的；转瞬即逝的\n"
+                "Output only the two lines. No extra explanation."
+            )},
+            {"role": "user", "content": text},
+        ]
+        tok = _llm_translator_tokenizer
+        if hasattr(tok, "apply_chat_template"):
+            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            prompt = f"Dictionary entry for: {text}"
+        result = generate(_llm_translator_model, tok, prompt=prompt, max_tokens=80, verbose=False)
+        result = result.strip()
+        sys.stderr.write(f"[TypelessMLX] LLM lookup result: {repr(result[:100])}\n")
+        sys.stderr.flush()
+        # Post-process: keep at most 3 lines, each capped at 100 chars
+        lines = [ln.strip() for ln in result.splitlines() if ln.strip()][:3]
+        lines = [ln[:100] for ln in lines]
+        # Remove duplicate comma-separated tokens within a line
+        def dedup_commas(s: str) -> str:
+            parts = [p.strip() for p in s.split("；")]
+            seen, out = set(), []
+            for p in parts:
+                if p.lower() not in seen:
+                    seen.add(p.lower()); out.append(p)
+            return "；".join(out)
+        lines = [dedup_commas(ln) if "；" in ln else ln for ln in lines]
+        return "\n".join(lines)
+    except Exception as e:
+        sys.stderr.write(f"[TypelessMLX] LLM lookup failed: {e}\n")
+        sys.stderr.flush()
+        return ""
+
+
 def _download_argos_background():
     """Download and install argostranslate en→zh in a background thread."""
     global _argos_initialized, _argos_ready, _en_zh_translator
-    _CERT_FILE = "/Users/donhu/all_certs.pem"
-    if os.path.exists(_CERT_FILE):
-        os.environ["SSL_CERT_FILE"] = _CERT_FILE
-        os.environ["REQUESTS_CA_BUNDLE"] = _CERT_FILE
     try:
         import argostranslate.package
         installed = argostranslate.package.get_installed_packages()
