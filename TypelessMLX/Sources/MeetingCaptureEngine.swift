@@ -3,7 +3,7 @@ import AVFoundation
 import AppKit
 import Foundation
 
-/// Captures Teams/Chrome audio via ScreenCaptureKit and feeds 5-second chunks
+/// Captures all system audio output via ScreenCaptureKit and feeds 5-second chunks
 /// to WhisperBridge for English transcription + Chinese translation.
 class MeetingCaptureEngine: NSObject {
     static let shared = MeetingCaptureEngine()
@@ -34,7 +34,6 @@ class MeetingCaptureEngine: NSObject {
     func setup(appState: AppState) {
         self.appState = appState
         self.transcriptOverlay = TranscriptOverlay()
-        registerWorkspaceObservers()
         appState.meetingSubtitleEnabled = false  // always start disabled; user enables manually
         logInfo("MeetingCaptureEngine", "Setup complete")
     }
@@ -65,48 +64,18 @@ class MeetingCaptureEngine: NSObject {
                 return
             }
             DispatchQueue.main.async { self?.appState?.hasScreenCapturePermission = true }
-            if let content = content {
-                self?.startStreamIfTeamsPresent(in: content)
+            guard let display = content?.displays.first(where: { $0.displayID == CGMainDisplayID() })
+                                ?? content?.displays.first else {
+                logError("MeetingCaptureEngine", "No display found")
+                return
             }
+            self?.startStream(display: display)
         }
-    }
-
-    // MARK: - App detection
-
-    private func findTeamsApp(in content: SCShareableContent) -> SCRunningApplication? {
-        let apps = content.applications
-        // Priority: Chrome → Safari → Teams
-        if let chrome = apps.first(where: { $0.bundleIdentifier == "com.google.Chrome" }) { return chrome }
-        if let safari = apps.first(where: { $0.bundleIdentifier == "com.apple.Safari" }) { return safari }
-        return apps.first(where: {
-            $0.bundleIdentifier == "com.microsoft.teams2" ||
-            $0.bundleIdentifier == "com.microsoft.teams"
-        })
-    }
-
-    private func startStreamIfTeamsPresent(in content: SCShareableContent) {
-        guard let teamsApp = findTeamsApp(in: content) else {
-            logInfo("MeetingCaptureEngine", "Teams not running")
-            return
-        }
-        let teamsWindows = content.windows.filter {
-            $0.owningApplication?.bundleIdentifier == teamsApp.bundleIdentifier
-        }
-        guard !teamsWindows.isEmpty else {
-            logInfo("MeetingCaptureEngine", "Teams running but no windows yet")
-            return
-        }
-        guard let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() })
-                            ?? content.displays.first else {
-            logError("MeetingCaptureEngine", "No display found")
-            return
-        }
-        startStream(teamsApp: teamsApp, display: display)
     }
 
     // MARK: - SCStream management
 
-    private func startStream(teamsApp: SCRunningApplication, display: SCDisplay) {
+    private func startStream(display: SCDisplay) {
         streamLock.lock()
         guard activeStream == nil else {
             streamLock.unlock()
@@ -115,7 +84,7 @@ class MeetingCaptureEngine: NSObject {
         }
         streamLock.unlock()
 
-        let filter = SCContentFilter(display: display, including: [teamsApp], exceptingWindows: [])
+        let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
         let config = SCStreamConfiguration()
         config.capturesAudio = true
@@ -142,7 +111,7 @@ class MeetingCaptureEngine: NSObject {
             self?.streamLock.lock()
             self?.activeStream = newStream
             self?.streamLock.unlock()
-            logInfo("MeetingCaptureEngine", "Capturing audio: \(teamsApp.applicationName)")
+            logInfo("MeetingCaptureEngine", "Capturing all system audio")
             DispatchQueue.main.async { self?.appState?.isTeamsMeetingActive = true }
         }
     }
@@ -258,32 +227,7 @@ class MeetingCaptureEngine: NSObject {
         }
     }
 
-    // MARK: - NSWorkspace observers
-
-    private func registerWorkspaceObservers() {
-        let nc = NSWorkspace.shared.notificationCenter
-        nc.addObserver(self, selector: #selector(appDidLaunch(_:)),
-                       name: NSWorkspace.didLaunchApplicationNotification, object: nil)
-        nc.addObserver(self, selector: #selector(appDidTerminate(_:)),
-                       name: NSWorkspace.didTerminateApplicationNotification, object: nil)
-    }
-
-    @objc private func appDidLaunch(_ notification: Notification) {}
-
-    @objc private func appDidTerminate(_ notification: Notification) {
-        guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-              isTeamsBundle(app.bundleIdentifier) else { return }
-        logInfo("MeetingCaptureEngine", "Teams terminated — stopping capture")
-        stopStream()
-    }
-
-    private func isTeamsBundle(_ bundleID: String?) -> Bool {
-        bundleID == "com.microsoft.teams2" || bundleID == "com.microsoft.teams"
-    }
-
-    deinit {
-        NSWorkspace.shared.notificationCenter.removeObserver(self)
-    }
+    deinit {}
 }
 
 // MARK: - SCStreamOutput

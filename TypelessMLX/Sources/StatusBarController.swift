@@ -150,7 +150,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         menu.addItem(NSMenuItem.separator())
 
         // Meeting subtitle section
-        let subtitleHeader = NSMenuItem(title: "会议字幕（Teams）", action: nil, keyEquivalent: "")
+        let subtitleHeader = NSMenuItem(title: "会议字幕", action: nil, keyEquivalent: "")
         subtitleHeader.isEnabled = false
         menu.addItem(subtitleHeader)
 
@@ -165,7 +165,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 permItem.target = self
                 menu.addItem(permItem)
             } else {
-                let captureState = appState.isTeamsMeetingActive ? "  ● 正在捕获 Teams 音频" : "  ○ 等待 Teams 启动..."
+                let captureState = appState.isTeamsMeetingActive ? "  ● 正在捕获系统音频" : "  ○ 正在启动..."
                 let captureItem = NSMenuItem(title: captureState, action: nil, keyEquivalent: "")
                 captureItem.isEnabled = false
                 menu.addItem(captureItem)
