@@ -9,11 +9,14 @@ class HotkeyManager {
     private var localFlagsMonitor: Any?
     private var lookupHotKeyRef: EventHotKeyRef?
     private var translateHotKeyRef: EventHotKeyRef?
+    private var ocrHotKeyRef: EventHotKeyRef?
     private var carbonHandlerInstalled = false
     private var lastLookupKeyCode = -1
     private var lastLookupModifiers = -1
     private var lastTranslateKeyCode = -1
     private var lastTranslateModifiers = -1
+    private var lastOcrKeyCode = -1
+    private var lastOcrModifiers = -1
     private var isRecording = false
     private var recordingStartTime: Date?
     private var overlay: RecordingOverlay?
@@ -76,6 +79,7 @@ class HotkeyManager {
                 switch hkID.id {
                 case 1: DispatchQueue.main.async { LookupManager.shared.lookup() }
                 case 2: DispatchQueue.main.async { TranslateManager.shared.translate() }
+                case 3: DispatchQueue.main.async { OCRManager.shared.startCapture() }
                 default: break
                 }
                 return noErr
@@ -87,8 +91,9 @@ class HotkeyManager {
     }
 
     private func registerHotKeyBindings() {
-        if let ref = lookupHotKeyRef { UnregisterEventHotKey(ref); lookupHotKeyRef = nil }
+        if let ref = lookupHotKeyRef    { UnregisterEventHotKey(ref); lookupHotKeyRef = nil }
         if let ref = translateHotKeyRef { UnregisterEventHotKey(ref); translateHotKeyRef = nil }
+        if let ref = ocrHotKeyRef       { UnregisterEventHotKey(ref); ocrHotKeyRef = nil }
 
         guard let appState = appState else { return }
 
@@ -96,11 +101,12 @@ class HotkeyManager {
         let lm  = appState.lookupHotkeyModifiers
         let tkc = appState.translateHotkeyKeyCode
         let tm  = appState.translateHotkeyModifiers
+        let okc = appState.ocrHotkeyKeyCode
+        let om  = appState.ocrHotkeyModifiers
 
-        lastLookupKeyCode    = lkc
-        lastLookupModifiers  = lm
-        lastTranslateKeyCode = tkc
-        lastTranslateModifiers = tm
+        lastLookupKeyCode    = lkc; lastLookupModifiers    = lm
+        lastTranslateKeyCode = tkc; lastTranslateModifiers = tm
+        lastOcrKeyCode       = okc; lastOcrModifiers       = om
 
         var lookupID = EventHotKeyID()
         lookupID.signature = 0x544C4D58
@@ -123,6 +129,17 @@ class HotkeyManager {
         } else {
             logError("HotkeyManager", "Translate hotkey registration failed: \(ts)")
         }
+
+        var ocrID = EventHotKeyID()
+        ocrID.signature = 0x544C4D58
+        ocrID.id = 3
+        let os = RegisterEventHotKey(UInt32(okc), UInt32(om),
+                                     ocrID, GetApplicationEventTarget(), 0, &ocrHotKeyRef)
+        if os == noErr {
+            logInfo("HotkeyManager", "OCR hotkey registered: kc=\(okc) mods=\(om)")
+        } else {
+            logError("HotkeyManager", "OCR hotkey registration failed: \(os)")
+        }
     }
 
     @objc private func userDefaultsChanged() {
@@ -131,8 +148,11 @@ class HotkeyManager {
         let lm  = appState.lookupHotkeyModifiers
         let tkc = appState.translateHotkeyKeyCode
         let tm  = appState.translateHotkeyModifiers
+        let okc = appState.ocrHotkeyKeyCode
+        let om  = appState.ocrHotkeyModifiers
         guard lkc != lastLookupKeyCode || lm != lastLookupModifiers ||
-              tkc != lastTranslateKeyCode || tm != lastTranslateModifiers else { return }
+              tkc != lastTranslateKeyCode || tm != lastTranslateModifiers ||
+              okc != lastOcrKeyCode || om != lastOcrModifiers else { return }
         registerHotKeyBindings()
     }
 
@@ -394,6 +414,7 @@ class HotkeyManager {
         if let monitor = localFlagsMonitor { NSEvent.removeMonitor(monitor) }
         if let ref = lookupHotKeyRef { UnregisterEventHotKey(ref) }
         if let ref = translateHotKeyRef { UnregisterEventHotKey(ref) }
+        if let ref = ocrHotKeyRef { UnregisterEventHotKey(ref) }
         NotificationCenter.default.removeObserver(self)
     }
 }

@@ -131,6 +131,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         translateSentenceItem.target = self
         menu.addItem(translateSentenceItem)
 
+        let ocrLabel = HotkeyRecorderNSView.format(keyCode: appState.ocrHotkeyKeyCode,
+                                                    modifiers: appState.ocrHotkeyModifiers)
+        let ocrItem = NSMenuItem(title: "OCR 截图识别  (\(ocrLabel))", action: #selector(triggerOCR), keyEquivalent: "")
+        ocrItem.target = self
+        menu.addItem(ocrItem)
+
         // Last transcription
         if let lastEntry = appState.history.first {
             menu.addItem(NSMenuItem.separator())
@@ -227,6 +233,10 @@ class StatusBarController: NSObject, NSMenuDelegate {
         } else {
             TranslateManager.shared.translate()
         }
+    }
+
+    @objc private func triggerOCR() {
+        OCRManager.shared.startCapture()
     }
 
     @objc private func toggleMeetingSubtitle() {

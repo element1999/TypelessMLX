@@ -63,6 +63,14 @@ struct GeneralSettingsTab: View {
                                         modifiers: $appState.translateHotkeyModifiers)
                         .frame(width: 110, height: 28)
                 }
+
+                HStack {
+                    Text("OCR 快捷键")
+                    Spacer()
+                    HotkeyRecorderField(keyCode: $appState.ocrHotkeyKeyCode,
+                                        modifiers: $appState.ocrHotkeyModifiers)
+                        .frame(width: 110, height: 28)
+                }
             }
 
             Section("录音设备") {

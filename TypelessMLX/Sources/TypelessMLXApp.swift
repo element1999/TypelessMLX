@@ -51,6 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup dictionary lookup
         LookupManager.shared.setup(appState: appState)
         TranslateManager.shared.setup(appState: appState)
+        OCRManager.shared.setup(appState: appState)
 
         // Register as macOS Services provider
         NSApp.servicesProvider = self

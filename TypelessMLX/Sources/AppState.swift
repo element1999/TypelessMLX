@@ -72,6 +72,8 @@ class AppState: ObservableObject {
     @AppStorage("lookupHotkeyModifiers") var lookupHotkeyModifiers: Int = 6144  // controlKey | optionKey
     @AppStorage("translateHotkeyKeyCode") var translateHotkeyKeyCode: Int = 17  // kVK_ANSI_T
     @AppStorage("translateHotkeyModifiers") var translateHotkeyModifiers: Int = 6144
+    @AppStorage("ocrHotkeyKeyCode")        var ocrHotkeyKeyCode: Int        = 31    // kVK_ANSI_O
+    @AppStorage("ocrHotkeyModifiers")      var ocrHotkeyModifiers: Int      = 6144  // controlKey | optionKey
     // Live transcription text (set by WhisperBridge progress callbacks)
     @Published var liveTranscriptionConfirmedText: String = ""
     @Published var liveTranscriptionUnconfirmedText: String = ""
