@@ -119,11 +119,15 @@ class StatusBarController: NSObject, NSMenuDelegate {
         hintItem.isEnabled = false
         menu.addItem(hintItem)
 
-        let translateItem = NSMenuItem(title: "翻译选中文字  (⌃⌥D)", action: #selector(translateSelectedText), keyEquivalent: "")
+        let lookupLabel = HotkeyRecorderNSView.format(keyCode: appState.lookupHotkeyKeyCode,
+                                                       modifiers: appState.lookupHotkeyModifiers)
+        let translateLabel = HotkeyRecorderNSView.format(keyCode: appState.translateHotkeyKeyCode,
+                                                          modifiers: appState.translateHotkeyModifiers)
+        let translateItem = NSMenuItem(title: "翻译选中文字  (\(lookupLabel))", action: #selector(translateSelectedText), keyEquivalent: "")
         translateItem.target = self
         menu.addItem(translateItem)
 
-        let translateSentenceItem = NSMenuItem(title: "翻译整句  (⌃⌥T)", action: #selector(translateSentence), keyEquivalent: "")
+        let translateSentenceItem = NSMenuItem(title: "翻译整句  (\(translateLabel))", action: #selector(translateSentence), keyEquivalent: "")
         translateSentenceItem.target = self
         menu.addItem(translateSentenceItem)
 

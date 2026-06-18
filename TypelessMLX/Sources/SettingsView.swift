@@ -47,6 +47,22 @@ struct GeneralSettingsTab: View {
                     Text("切换模式（点击开始，再按停止）").tag("toggle")
                     Text("按住模式（按住录音，松开停止）").tag("hold")
                 }
+
+                HStack {
+                    Text("查词快捷键")
+                    Spacer()
+                    HotkeyRecorderField(keyCode: $appState.lookupHotkeyKeyCode,
+                                        modifiers: $appState.lookupHotkeyModifiers)
+                        .frame(width: 110, height: 28)
+                }
+
+                HStack {
+                    Text("翻译快捷键")
+                    Spacer()
+                    HotkeyRecorderField(keyCode: $appState.translateHotkeyKeyCode,
+                                        modifiers: $appState.translateHotkeyModifiers)
+                        .frame(width: 110, height: 28)
+                }
             }
 
             Section("录音设备") {

@@ -68,6 +68,10 @@ class AppState: ObservableObject {
     @AppStorage("enableTextRefinement") var enableTextRefinement: Bool = true
     @AppStorage("removeFillers") var removeFillers: Bool = false
     @AppStorage("meetingSubtitleEnabled") var meetingSubtitleEnabled: Bool = false
+    @AppStorage("lookupHotkeyKeyCode") var lookupHotkeyKeyCode: Int = 2        // kVK_ANSI_D
+    @AppStorage("lookupHotkeyModifiers") var lookupHotkeyModifiers: Int = 6144  // controlKey | optionKey
+    @AppStorage("translateHotkeyKeyCode") var translateHotkeyKeyCode: Int = 17  // kVK_ANSI_T
+    @AppStorage("translateHotkeyModifiers") var translateHotkeyModifiers: Int = 6144
     // Live transcription text (set by WhisperBridge progress callbacks)
     @Published var liveTranscriptionConfirmedText: String = ""
     @Published var liveTranscriptionUnconfirmedText: String = ""

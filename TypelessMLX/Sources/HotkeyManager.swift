@@ -9,6 +9,11 @@ class HotkeyManager {
     private var localFlagsMonitor: Any?
     private var lookupHotKeyRef: EventHotKeyRef?
     private var translateHotKeyRef: EventHotKeyRef?
+    private var carbonHandlerInstalled = false
+    private var lastLookupKeyCode = -1
+    private var lastLookupModifiers = -1
+    private var lastTranslateKeyCode = -1
+    private var lastTranslateModifiers = -1
     private var isRecording = false
     private var recordingStartTime: Date?
     private var overlay: RecordingOverlay?
@@ -30,6 +35,13 @@ class HotkeyManager {
             object: nil
         )
         logInfo("HotkeyManager", "Setup. keyCode=\(appState.hotkeyKeyCode), mode=\(appState.hotkeyMode)")
+
+        NotificationCenter.default.addObserver(
+            self,
+            selector: #selector(userDefaultsChanged),
+            name: UserDefaults.didChangeNotification,
+            object: nil
+        )
     }
 
     @objc private func handleAudioDeviceLost() {
@@ -53,28 +65,50 @@ class HotkeyManager {
     }
 
     private func registerCarbonHotKeys() {
-        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
-                                      eventKind: UInt32(kEventHotKeyPressed))
-        InstallEventHandler(GetApplicationEventTarget(), { (_, event, _) -> OSStatus in
-            var hkID = EventHotKeyID()
-            GetEventParameter(event!, EventParamName(kEventParamDirectObject),
-                              EventParamType(typeEventHotKeyID), nil,
-                              MemoryLayout<EventHotKeyID>.size, nil, &hkID)
-            switch hkID.id {
-            case 1: DispatchQueue.main.async { LookupManager.shared.lookup() }
-            case 2: DispatchQueue.main.async { TranslateManager.shared.translate() }
-            default: break
-            }
-            return noErr
-        }, 1, &eventSpec, nil, nil)
+        if !carbonHandlerInstalled {
+            var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                          eventKind: UInt32(kEventHotKeyPressed))
+            InstallEventHandler(GetApplicationEventTarget(), { (_, event, _) -> OSStatus in
+                var hkID = EventHotKeyID()
+                GetEventParameter(event!, EventParamName(kEventParamDirectObject),
+                                  EventParamType(typeEventHotKeyID), nil,
+                                  MemoryLayout<EventHotKeyID>.size, nil, &hkID)
+                switch hkID.id {
+                case 1: DispatchQueue.main.async { LookupManager.shared.lookup() }
+                case 2: DispatchQueue.main.async { TranslateManager.shared.translate() }
+                default: break
+                }
+                return noErr
+            }, 1, &eventSpec, nil, nil)
+            carbonHandlerInstalled = true
+            logInfo("HotkeyManager", "Carbon event handler installed")
+        }
+        registerHotKeyBindings()
+    }
+
+    private func registerHotKeyBindings() {
+        if let ref = lookupHotKeyRef { UnregisterEventHotKey(ref); lookupHotKeyRef = nil }
+        if let ref = translateHotKeyRef { UnregisterEventHotKey(ref); translateHotKeyRef = nil }
+
+        guard let appState = appState else { return }
+
+        let lkc = appState.lookupHotkeyKeyCode
+        let lm  = appState.lookupHotkeyModifiers
+        let tkc = appState.translateHotkeyKeyCode
+        let tm  = appState.translateHotkeyModifiers
+
+        lastLookupKeyCode    = lkc
+        lastLookupModifiers  = lm
+        lastTranslateKeyCode = tkc
+        lastTranslateModifiers = tm
 
         var lookupID = EventHotKeyID()
-        lookupID.signature = 0x544C4D58  // 'TLMX'
+        lookupID.signature = 0x544C4D58
         lookupID.id = 1
-        let ls = RegisterEventHotKey(UInt32(kVK_ANSI_D), UInt32(controlKey | optionKey),
+        let ls = RegisterEventHotKey(UInt32(lkc), UInt32(lm),
                                      lookupID, GetApplicationEventTarget(), 0, &lookupHotKeyRef)
         if ls == noErr {
-            logInfo("HotkeyManager", "Lookup hotkey registered via Carbon (Ctrl+Option+D)")
+            logInfo("HotkeyManager", "Lookup hotkey registered: kc=\(lkc) mods=\(lm)")
         } else {
             logError("HotkeyManager", "Lookup hotkey registration failed: \(ls)")
         }
@@ -82,13 +116,24 @@ class HotkeyManager {
         var translateID = EventHotKeyID()
         translateID.signature = 0x544C4D58
         translateID.id = 2
-        let ts = RegisterEventHotKey(UInt32(kVK_ANSI_T), UInt32(controlKey | optionKey),
+        let ts = RegisterEventHotKey(UInt32(tkc), UInt32(tm),
                                      translateID, GetApplicationEventTarget(), 0, &translateHotKeyRef)
         if ts == noErr {
-            logInfo("HotkeyManager", "Translate hotkey registered via Carbon (Ctrl+Option+T)")
+            logInfo("HotkeyManager", "Translate hotkey registered: kc=\(tkc) mods=\(tm)")
         } else {
             logError("HotkeyManager", "Translate hotkey registration failed: \(ts)")
         }
+    }
+
+    @objc private func userDefaultsChanged() {
+        guard let appState = appState else { return }
+        let lkc = appState.lookupHotkeyKeyCode
+        let lm  = appState.lookupHotkeyModifiers
+        let tkc = appState.translateHotkeyKeyCode
+        let tm  = appState.translateHotkeyModifiers
+        guard lkc != lastLookupKeyCode || lm != lastLookupModifiers ||
+              tkc != lastTranslateKeyCode || tm != lastTranslateModifiers else { return }
+        registerHotKeyBindings()
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
