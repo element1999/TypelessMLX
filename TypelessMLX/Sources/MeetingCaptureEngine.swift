@@ -2,30 +2,38 @@ import ScreenCaptureKit
 import AVFoundation
 import AppKit
 import Foundation
+import Speech
 
-/// Captures all system audio output via ScreenCaptureKit and feeds 5-second chunks
-/// to WhisperBridge for English transcription + Chinese translation.
+/// Captures all system audio via ScreenCaptureKit, streams it to SFSpeechRecognizer
+/// for real-time English subtitles, and asynchronously translates to Chinese via Qwen.
 class MeetingCaptureEngine: NSObject {
     static let shared = MeetingCaptureEngine()
 
     private weak var appState: AppState?
-    private var transcriptOverlay: TranscriptOverlay?
+    private var subtitleOverlay: SubtitleOverlay?
 
+    // SCStream
     private let streamLock = NSLock()
     private var activeStream: SCStream?
 
-    // Audio accumulation — only accessed on audioQueue
-    private let audioQueue = DispatchQueue(label: "com.typelessmlx.meetingaudio", qos: .userInteractive)
-    private var accumulatedSamples: [Float] = []
-    private var isProcessingChunk = false
+    // Speech recognition (main-thread owned, requestLock guards cross-thread access)
+    private let requestLock = NSLock()
+    private var _recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
+    private var recognitionTask: SFSpeechRecognitionTask?
+    private var speechRecognizer: SFSpeechRecognizer?
 
-    // Paragraph break detection
-    private var silentChunkCount = 0
-    private static let newParagraphThreshold = 2   // 2 silent chunks (~10s) = new paragraph
+    // Session state — main thread only
+    private var restartTimer: Timer?
+    private var translationTimer: Timer?
+    private var translationGeneration: Int = 0
+    private var lastPartialText: String = ""
+    private var sessionLastEnglish: String = ""
+    private var sessionLastChinese: String = ""
 
-    private static let sampleRate: Double = 16000
-    private static let chunkFrames: Int = 80_000      // 5s × 16 000
-    private static let maxBufferFrames: Int = 160_000  // 10s cap
+    private static let sessionDuration: TimeInterval = 50.0
+    private static let translationDebounce: TimeInterval = 2.0
+    private static let maxDisplayChars: Int = 150
+    private static let maxTranslationChars: Int = 300
 
     private override init() { super.init() }
 
@@ -33,28 +41,26 @@ class MeetingCaptureEngine: NSObject {
 
     func setup(appState: AppState) {
         self.appState = appState
-        self.transcriptOverlay = TranscriptOverlay()
-        appState.meetingSubtitleEnabled = false  // always start disabled; user enables manually
+        self.subtitleOverlay = SubtitleOverlay()
+        appState.meetingSubtitleEnabled = false
         logInfo("MeetingCaptureEngine", "Setup complete")
     }
 
     func stop() {
-        stopStream()
-        transcriptOverlay?.hide()
+        stopAll()
+        subtitleOverlay?.hide()
     }
-
-    // MARK: - Feature toggle
 
     func setEnabled(_ enabled: Bool) {
         if enabled {
             checkPermissionsAndStart()
         } else {
-            stopStream()
-            transcriptOverlay?.hide()
+            stopAll()
+            subtitleOverlay?.hide()
         }
     }
 
-    // MARK: - Permission & content enumeration
+    // MARK: - Permission
 
     private func checkPermissionsAndStart() {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
@@ -73,46 +79,45 @@ class MeetingCaptureEngine: NSObject {
         }
     }
 
-    // MARK: - SCStream management
+    // MARK: - SCStream
 
     private func startStream(display: SCDisplay) {
         streamLock.lock()
-        guard activeStream == nil else {
-            streamLock.unlock()
-            logDebug("MeetingCaptureEngine", "Stream already active")
-            return
-        }
+        guard activeStream == nil else { streamLock.unlock(); return }
         streamLock.unlock()
 
         let filter = SCContentFilter(display: display, excludingApplications: [], exceptingWindows: [])
 
         let config = SCStreamConfiguration()
         config.capturesAudio = true
-        config.sampleRate = Int(Self.sampleRate)
+        config.sampleRate = 16000
         config.channelCount = 1
         config.excludesCurrentProcessAudio = true
         config.minimumFrameInterval = CMTime(value: 1, timescale: 1)
         config.width = 2
         config.height = 2
 
-        let newStream = SCStream(filter: filter, configuration: config, delegate: self)
+        let stream = SCStream(filter: filter, configuration: config, delegate: self)
         do {
-            try newStream.addStreamOutput(self, type: SCStreamOutputType.audio, sampleHandlerQueue: audioQueue)
+            try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: .global(qos: .userInteractive))
         } catch {
             logError("MeetingCaptureEngine", "addStreamOutput failed: \(error)")
             return
         }
 
-        newStream.startCapture { [weak self] (error: Error?) in
+        stream.startCapture { [weak self] error in
             if let error = error {
                 logError("MeetingCaptureEngine", "startCapture failed: \(error)")
                 return
             }
             self?.streamLock.lock()
-            self?.activeStream = newStream
+            self?.activeStream = stream
             self?.streamLock.unlock()
             logInfo("MeetingCaptureEngine", "Capturing all system audio")
-            DispatchQueue.main.async { self?.appState?.isTeamsMeetingActive = true }
+            DispatchQueue.main.async {
+                self?.appState?.isTeamsMeetingActive = true
+                self?.startRecognition()
+            }
         }
     }
 
@@ -121,109 +126,119 @@ class MeetingCaptureEngine: NSObject {
         let stream = activeStream
         activeStream = nil
         streamLock.unlock()
-
-        stream?.stopCapture { (error: Error?) in
+        stream?.stopCapture { error in
             if let error = error { logError("MeetingCaptureEngine", "stopCapture: \(error)") }
-            logInfo("MeetingCaptureEngine", "Stream stopped")
-        }
-        audioQueue.async { [weak self] in
-            self?.accumulatedSamples.removeAll()
-            self?.isProcessingChunk = false
-            self?.silentChunkCount = 0
         }
         DispatchQueue.main.async { self.appState?.isTeamsMeetingActive = false }
     }
 
-    // MARK: - Audio accumulation (on audioQueue)
-
-    private func processSampleBuffer(_ sampleBuffer: CMSampleBuffer) {
-        guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else { return }
-
-        var totalLength = 0
-        var dataPointer: UnsafeMutablePointer<CChar>?
-        let status = CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0,
-                                                  lengthAtOffsetOut: nil,
-                                                  totalLengthOut: &totalLength,
-                                                  dataPointerOut: &dataPointer)
-        guard status == kCMBlockBufferNoErr, let ptr = dataPointer else { return }
-
-        let frameCount = totalLength / MemoryLayout<Float32>.size
-        guard frameCount > 0 else { return }
-
-        let floatPtr = UnsafeRawPointer(ptr).assumingMemoryBound(to: Float32.self)
-        accumulatedSamples.append(contentsOf: UnsafeBufferPointer(start: floatPtr, count: frameCount))
-
-        if accumulatedSamples.count > Self.maxBufferFrames {
-            accumulatedSamples.removeFirst(accumulatedSamples.count - Self.maxBufferFrames)
-            logWarn("MeetingCaptureEngine", "Buffer capped — processing falling behind")
+    private func stopAll() {
+        DispatchQueue.main.async { [weak self] in
+            self?.restartTimer?.invalidate()
+            self?.translationTimer?.invalidate()
+            self?.restartTimer = nil
+            self?.translationTimer = nil
         }
-
-        if accumulatedSamples.count >= Self.chunkFrames && !isProcessingChunk {
-            let chunk = Array(accumulatedSamples.prefix(Self.chunkFrames))
-            accumulatedSamples.removeFirst(Self.chunkFrames)
-            processChunk(chunk)
-        }
+        stopRecognition()
+        stopStream()
     }
 
-    private func processChunk(_ samples: [Float]) {
-        guard appState?.meetingSubtitleEnabled == true else { return }
+    // MARK: - Speech recognition (main thread)
 
-        let rms = sqrt(samples.map { $0 * $0 }.reduce(0, +) / Float(samples.count))
-        guard rms > 0.003 else {
-            silentChunkCount += 1
-            isProcessingChunk = false
-            return
-        }
-        guard appState?.hasPythonBackend == true else {
-            logDebug("MeetingCaptureEngine", "Python backend not ready — dropping chunk")
-            return
+    private func startRecognition() {
+        // Push last session's text to history row before resetting
+        if !sessionLastEnglish.isEmpty {
+            subtitleOverlay?.advanceToHistory(english: sessionLastEnglish, chinese: sessionLastChinese)
         }
 
-        // Mark paragraph break after sufficient silence
-        let isNewParagraph = silentChunkCount >= Self.newParagraphThreshold
-        silentChunkCount = 0
-        isProcessingChunk = true
+        stopRecognition()
+        lastPartialText = ""
+        sessionLastEnglish = ""
+        sessionLastChinese = ""
 
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("typelessmlx_subtitle_\(UUID().uuidString).wav")
-
-        guard let format = AVAudioFormat(standardFormatWithSampleRate: Self.sampleRate, channels: 1),
-              let buffer = AVAudioPCMBuffer(pcmFormat: format,
-                                            frameCapacity: AVAudioFrameCount(samples.count)) else {
-            isProcessingChunk = false
+        let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
+        guard recognizer?.isAvailable == true else {
+            logError("MeetingCaptureEngine", "SFSpeechRecognizer unavailable")
             return
         }
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        guard let channelData = buffer.floatChannelData?[0] else { isProcessingChunk = false; return }
-        for (i, s) in samples.enumerated() { channelData[i] = s }
+        speechRecognizer = recognizer
 
-        do {
-            let file = try AVAudioFile(forWriting: url, settings: format.settings)
-            try file.write(from: buffer)
-        } catch {
-            logError("MeetingCaptureEngine", "WAV write failed: \(error)")
-            isProcessingChunk = false
-            return
-        }
+        let request = SFSpeechAudioBufferRecognitionRequest()
+        request.shouldReportPartialResults = true
+        request.requiresOnDeviceRecognition = true
 
-        let model = appState?.resolvedSubtitleModelPath
-        logDebug("MeetingCaptureEngine", "Sending 5s chunk (newParagraph=\(isNewParagraph))")
+        requestLock.lock()
+        _recognitionRequest = request
+        requestLock.unlock()
 
-        WhisperBridge.shared.transcribeForSubtitle(audioURL: url, model: model) { [weak self] result in
-            try? FileManager.default.removeItem(at: url)
-            switch result {
-            case .success(let pair):
-                let english = pair.english.trimmingCharacters(in: .whitespacesAndNewlines)
-                let chinese = pair.chinese.trimmingCharacters(in: .whitespacesAndNewlines)
-                logInfo("MeetingCaptureEngine", "Transcript EN: '\(english.prefix(60))'")
-                if !english.isEmpty {
-                    self?.transcriptOverlay?.appendEntry(english: english, chinese: chinese,
-                                                        newParagraph: isNewParagraph)
-                }
-            case .failure(let error):
-                logWarn("MeetingCaptureEngine", "Subtitle failed: \(error.localizedDescription)")
+        recognitionTask = recognizer?.recognitionTask(with: request) { [weak self] result, error in
+            guard let self = self else { return }
+            if let result = result {
+                let text = result.bestTranscription.formattedString
+                DispatchQueue.main.async { self.handleRecognitionResult(text, isFinal: result.isFinal) }
             }
-            self?.audioQueue.async { self?.isProcessingChunk = false }
+            if error != nil {
+                DispatchQueue.main.async {
+                    guard self.appState?.meetingSubtitleEnabled == true else { return }
+                    logDebug("MeetingCaptureEngine", "Recognition error — restarting")
+                    self.startRecognition()
+                }
+            }
+        }
+
+        restartTimer?.invalidate()
+        restartTimer = Timer.scheduledTimer(withTimeInterval: Self.sessionDuration, repeats: false) { [weak self] _ in
+            guard self?.appState?.meetingSubtitleEnabled == true else { return }
+            logDebug("MeetingCaptureEngine", "Session timeout — restarting")
+            self?.startRecognition()
+        }
+
+        logInfo("MeetingCaptureEngine", "Recognition started (en-US, on-device)")
+    }
+
+    private func stopRecognition() {
+        requestLock.lock()
+        _recognitionRequest?.endAudio()
+        _recognitionRequest = nil
+        requestLock.unlock()
+        recognitionTask?.cancel()
+        recognitionTask = nil
+        speechRecognizer = nil
+    }
+
+    // MARK: - Result handling (main thread)
+
+    private func handleRecognitionResult(_ text: String, isFinal: Bool) {
+        guard text != lastPartialText, !text.isEmpty else { return }
+        lastPartialText = text
+        sessionLastEnglish = String(text.suffix(Self.maxDisplayChars))
+
+        subtitleOverlay?.updatePartialEnglish(sessionLastEnglish)
+        scheduleTranslation(text, immediate: isFinal)
+    }
+
+    private func scheduleTranslation(_ fullText: String, immediate: Bool) {
+        guard appState?.hasPythonBackend == true else { return }
+
+        translationTimer?.invalidate()
+        let delay: TimeInterval = immediate ? 0 : Self.translationDebounce
+
+        translationTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+            guard let self = self else { return }
+            self.translationGeneration += 1
+            let gen = self.translationGeneration
+            let chunk = String(fullText.suffix(Self.maxTranslationChars))
+
+            WhisperBridge.shared.translate(text: chunk) { [weak self] result in
+                guard let self = self else { return }
+                if case .success(let chinese) = result, !chinese.isEmpty {
+                    DispatchQueue.main.async {
+                        guard gen == self.translationGeneration else { return }
+                        self.sessionLastChinese = chinese
+                        self.subtitleOverlay?.updateChineseTranslation(chinese)
+                    }
+                }
+            }
         }
     }
 
@@ -236,8 +251,11 @@ extension MeetingCaptureEngine: SCStreamOutput {
     func stream(_ stream: SCStream,
                 didOutputSampleBuffer sampleBuffer: CMSampleBuffer,
                 of type: SCStreamOutputType) {
-        guard type == SCStreamOutputType.audio else { return }
-        processSampleBuffer(sampleBuffer)
+        guard type == .audio else { return }
+        requestLock.lock()
+        let req = _recognitionRequest
+        requestLock.unlock()
+        req?.appendAudioSampleBuffer(sampleBuffer)
     }
 }
 
