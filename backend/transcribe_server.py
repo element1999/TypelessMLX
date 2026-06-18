@@ -48,11 +48,6 @@ def send(data: dict):
 _qwen3_model = None
 _qwen3_model_path = None
 
-_argos_initialized = False
-_argos_ready = False   # True only when package is installed and translator loaded
-_en_zh_translator = None
-_argos_lock = None     # threading.Lock, set in main()
-
 _TRANSLATE_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 _llm_translator_model = None
 _llm_translator_tokenizer = None
@@ -149,52 +144,6 @@ def lookup_word_llm(text: str) -> str:
         sys.stderr.flush()
         return ""
 
-
-def _download_argos_background():
-    """Download and install argostranslate en→zh in a background thread."""
-    global _argos_initialized, _argos_ready, _en_zh_translator
-    try:
-        import argostranslate.package
-        installed = argostranslate.package.get_installed_packages()
-        if not any(p.from_code == "en" and p.to_code == "zh" for p in installed):
-            sys.stderr.write("[TypelessMLX] 后台下载 en→zh 翻译语言包 (~100MB)...\n")
-            sys.stderr.flush()
-            argostranslate.package.update_package_index()
-            available = argostranslate.package.get_available_packages()
-            pkg = next((p for p in available if p.from_code == "en" and p.to_code == "zh"), None)
-            if pkg is None:
-                raise RuntimeError("argostranslate en→zh package not found in index")
-            argostranslate.package.install_from_path(pkg.download())
-            sys.stderr.write("[TypelessMLX] en→zh 语言包安装完成\n")
-            sys.stderr.flush()
-        # Use MiniSBD (offline sentence splitter) instead of Stanza
-        import argostranslate.settings
-        argostranslate.settings.chunk_type = argostranslate.settings.ChunkType.MINISBD
-        import argostranslate.translate
-        _en_zh_translator = argostranslate.translate.get_translation_from_codes("en", "zh")
-        _argos_ready = True
-        sys.stderr.write("[TypelessMLX] 翻译引擎就绪\n")
-        sys.stderr.flush()
-    except Exception as e:
-        sys.stderr.write(f"[TypelessMLX] 翻译引擎初始化失败: {e}\n")
-        sys.stderr.flush()
-    finally:
-        _argos_initialized = True
-
-
-def translate_to_chinese(text: str) -> str:
-    if not text.strip():
-        return ""
-    if not _argos_ready or _en_zh_translator is None:
-        return ""   # Not ready yet — caller shows English fallback
-    try:
-        import argostranslate.settings
-        argostranslate.settings.chunk_type = argostranslate.settings.ChunkType.MINISBD
-        return _en_zh_translator.translate(text)
-    except Exception as e:
-        sys.stderr.write(f"[TypelessMLX] 翻译失败: {e}\n")
-        sys.stderr.flush()
-        return ""
 
 
 def transcribe_qwen3(audio_path: str, model_path: str, language: str | None,
@@ -384,11 +333,8 @@ def translate_to_english_llm(text: str) -> str:
 
 
 def main():
-    global _argos_lock
     import threading
     import mlx_whisper  # pre-load before background threads start to avoid import-lock races
-    _argos_lock = threading.Lock()
-    threading.Thread(target=_download_argos_background, daemon=True).start()
     threading.Thread(target=_load_llm_translator_background, daemon=True).start()
 
     # Signal Swift that we're ready
@@ -462,10 +408,7 @@ def main():
                     send({"id": req_id, "text": "", "translated": "", "error": None})
                     continue
                 if text.strip():
-                    # Prefer LLM translator; fall back to argostranslate while model loads
                     translated = translate_to_chinese_llm(text)
-                    if not translated:
-                        translated = translate_to_chinese(text)
                 else:
                     translated = ""
                 send({"id": req_id, "text": text, "translated": translated, "error": None})
@@ -486,8 +429,6 @@ def main():
                     sys.stderr.write(f"[TypelessMLX] translate: EN→ZH\n")
                     sys.stderr.flush()
                     translated = translate_to_chinese_llm(text)
-                    if not translated:
-                        translated = translate_to_chinese(text)
                 send({"id": req_id, "text": translated, "error": None})
 
             elif action == "lookup":
