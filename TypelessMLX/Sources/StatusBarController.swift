@@ -3,14 +3,16 @@ import SwiftUI
 import Combine
 import UserNotifications
 
-class StatusBarController {
+class StatusBarController: NSObject, NSMenuDelegate {
     private var statusItem: NSStatusItem
     private var appState: AppState
     private var cancellables = Set<AnyCancellable>()
+    private var pendingLookupText: String?
 
     init(appState: AppState) {
         self.appState = appState
         self.statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        super.init()
         setupButton()
         setupMenu()
         observeState()
@@ -117,6 +119,10 @@ class StatusBarController {
         hintItem.isEnabled = false
         menu.addItem(hintItem)
 
+        let translateItem = NSMenuItem(title: "翻译选中文字  (⌃⌥D)", action: #selector(translateSelectedText), keyEquivalent: "")
+        translateItem.target = self
+        menu.addItem(translateItem)
+
         // Last transcription
         if let lastEntry = appState.history.first {
             menu.addItem(NSMenuItem.separator())
@@ -174,6 +180,36 @@ class StatusBarController {
         menu.addItem(quitItem)
 
         self.statusItem.menu = menu
+        menu.delegate = self
+    }
+
+    // MARK: - NSMenuDelegate
+
+    func menuWillOpen(_ menu: NSMenu) {
+        pendingLookupText = captureSelectedText()
+        logInfo("StatusBar", "menuWillOpen, capturedText=\(pendingLookupText?.prefix(30) ?? "nil")")
+    }
+
+    private func captureSelectedText() -> String? {
+        let sys = AXUIElementCreateSystemWide()
+        var focusedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(sys, kAXFocusedUIElementAttribute as CFString, &focusedRef) == .success,
+              let focused = focusedRef else { return nil }
+        let axFocused = focused as! AXUIElement
+        var selectedRef: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axFocused, kAXSelectedTextAttribute as CFString, &selectedRef) == .success,
+              let text = selectedRef as? String,
+              !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        return text
+    }
+
+    @objc private func translateSelectedText() {
+        if let text = pendingLookupText {
+            pendingLookupText = nil
+            LookupManager.shared.lookupText(text)
+        } else {
+            LookupManager.shared.lookup()
+        }
     }
 
     @objc private func toggleMeetingSubtitle() {

@@ -360,6 +360,40 @@ class WhisperBridge {
         queueRequest(payload: request, timeout: 180.0, label: "Subtitle", completion: wrapped)
     }
 
+    func lookup(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+        lock.lock()
+        guard isReady else {
+            lock.unlock()
+            let err = NSError(domain: "WhisperBridge", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "Python backend not ready"])
+            completion(.failure(err))
+            return
+        }
+        lock.unlock()
+
+        resetIdleTimer()
+
+        let request: [String: Any] = ["action": "lookup", "text": text]
+        queueRequest(payload: request, timeout: 30.0, label: "Lookup", completion: completion)
+    }
+
+    func translate(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+        lock.lock()
+        guard isReady else {
+            lock.unlock()
+            let err = NSError(domain: "WhisperBridge", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "Python backend not ready"])
+            completion(.failure(err))
+            return
+        }
+        lock.unlock()
+
+        resetIdleTimer()
+
+        let request: [String: Any] = ["action": "translate", "text": text]
+        queueRequest(payload: request, timeout: 30.0, label: "Translate", completion: completion)
+    }
+
     func transcribe(audioURL: URL, model: String?, language: String?,
                     completion: @escaping (Result<String, Error>) -> Void) {
         lock.lock()

@@ -7,6 +7,7 @@ class HotkeyManager {
     private var appState: AppState?
     private var flagsMonitor: Any?
     private var localFlagsMonitor: Any?
+    private var lookupHotKeyRef: EventHotKeyRef?
     private var isRecording = false
     private var recordingStartTime: Date?
     private var overlay: RecordingOverlay?
@@ -47,6 +48,39 @@ class HotkeyManager {
             return event
         }
         logInfo("HotkeyManager", "Flag monitors registered")
+        registerLookupHotKey()
+    }
+
+    private func registerLookupHotKey() {
+        // Install a Carbon event handler for kEventHotKeyPressed.
+        // This works system-wide without Input Monitoring permission.
+        var eventSpec = EventTypeSpec(eventClass: OSType(kEventClassKeyboard),
+                                      eventKind: UInt32(kEventHotKeyPressed))
+        InstallEventHandler(GetApplicationEventTarget(), { (_, event, _) -> OSStatus in
+            var hkID = EventHotKeyID()
+            GetEventParameter(event!, EventParamName(kEventParamDirectObject),
+                              EventParamType(typeEventHotKeyID), nil,
+                              MemoryLayout<EventHotKeyID>.size, nil, &hkID)
+            if hkID.id == 1 {
+                DispatchQueue.main.async { LookupManager.shared.lookup() }
+            }
+            return noErr
+        }, 1, &eventSpec, nil, nil)
+
+        var hotKeyID = EventHotKeyID()
+        hotKeyID.signature = 0x544C4D58  // 'TLMX'
+        hotKeyID.id = 1
+
+        let status = RegisterEventHotKey(UInt32(kVK_ANSI_D),
+                                          UInt32(controlKey | optionKey),
+                                          hotKeyID,
+                                          GetApplicationEventTarget(), 0,
+                                          &lookupHotKeyRef)
+        if status == noErr {
+            logInfo("HotkeyManager", "Lookup hotkey registered via Carbon (Ctrl+Option+D)")
+        } else {
+            logError("HotkeyManager", "Carbon hotkey registration failed: \(status)")
+        }
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
@@ -305,6 +339,7 @@ class HotkeyManager {
     deinit {
         if let monitor = flagsMonitor { NSEvent.removeMonitor(monitor) }
         if let monitor = localFlagsMonitor { NSEvent.removeMonitor(monitor) }
+        if let ref = lookupHotKeyRef { UnregisterEventHotKey(ref) }
         NotificationCenter.default.removeObserver(self)
     }
 }

@@ -48,6 +48,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Setup meeting subtitle engine
         MeetingCaptureEngine.shared.setup(appState: appState)
 
+        // Setup dictionary lookup
+        LookupManager.shared.setup(appState: appState)
+
+        // Register as macOS Services provider
+        NSApp.servicesProvider = self
+        NSUpdateDynamicServices()
+
         // Periodically re-check permissions
         permissionCheckTimer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             self?.recheckPermissions()
@@ -62,6 +69,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         AudioRecorder.shared.forceReset()
         WhisperBridge.shared.stopProcess()
         MeetingCaptureEngine.shared.stop()
+    }
+
+    // MARK: - macOS Services
+
+    @objc func lookupSelectedText(_ pboard: NSPasteboard, userData: String,
+                                   error: AutoreleasingUnsafeMutablePointer<NSString?>) {
+        guard let text = pboard.string(forType: .string) else { return }
+        LookupManager.shared.lookupText(text)
     }
 
     private func installCrashHandler() {

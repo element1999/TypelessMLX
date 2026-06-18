@@ -259,6 +259,58 @@ def resolve_model(requested: str | None) -> str:
     return FALLBACK_MODEL
 
 
+def lookup_word_llm(text: str) -> str:
+    """Generate a dictionary-style entry using the LLM."""
+    if not text.strip() or not _llm_translator_ready:
+        return ""
+    try:
+        from mlx_lm import generate
+        messages = [
+            {"role": "system", "content": (
+                "你是英汉词典，只输出2行，不多不少。格式：\n"
+                "第1行: [词性] [中文核心含义，不超过8字]\n"
+                "第2行: 例: [英文短句] → [中文]\n\n"
+                "示例（单词 calculate）：\n"
+                "v. 计算；估算\n"
+                "例: Calculate the cost. → 计算成本。"
+            )},
+            {"role": "user", "content": text},
+        ]
+        tok = _llm_translator_tokenizer
+        if hasattr(tok, "apply_chat_template"):
+            prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        else:
+            prompt = f"查词：{text}"
+        result = generate(_llm_translator_model, tok, prompt=prompt, max_tokens=80, verbose=False)
+        result = result.strip()
+        # Keep at most 3 non-empty lines; truncate each to 100 chars
+        lines = [l[:100] for l in result.splitlines() if l.strip()]
+        # Within each line, deduplicate comma/semicolon-separated tokens
+        clean = []
+        for line in lines[:3]:
+            if any(sep in line for sep in ('，', '；', '、')):
+                parts = re.split(r'[，；、]', line)
+                seen_p, deduped_p = set(), []
+                for p in parts:
+                    k = p.strip()
+                    if k and k not in seen_p:
+                        seen_p.add(k)
+                        deduped_p.append(p)
+                    elif k in seen_p:
+                        break
+                clean.append('；'.join(deduped_p))
+            else:
+                clean.append(line)
+        result = "\n".join(clean).strip()
+        sys.stderr.write(f"[TypelessMLX] lookup result: {repr(result[:120])}\n")
+        sys.stderr.flush()
+        return result
+    except Exception as e:
+        sys.stderr.write(f"[TypelessMLX] lookup failed: {e}\n")
+        sys.stderr.flush()
+        return ""
+
+
 def main():
     global _argos_lock
     import threading
@@ -345,6 +397,24 @@ def main():
                 else:
                     translated = ""
                 send({"id": req_id, "text": text, "translated": translated, "error": None})
+
+            elif action == "translate":
+                text = req.get("text", "")
+                if not text.strip():
+                    send({"id": req_id, "text": "", "error": None})
+                    continue
+                translated = translate_to_chinese_llm(text)
+                if not translated:
+                    translated = translate_to_chinese(text)
+                send({"id": req_id, "text": translated, "error": None})
+
+            elif action == "lookup":
+                text = req.get("text", "")
+                if not text.strip():
+                    send({"id": req_id, "text": "", "error": None})
+                    continue
+                entry = lookup_word_llm(text)
+                send({"id": req_id, "text": entry, "error": None})
 
             else:
                 send({"id": req_id, "error": f"Unknown action: {action}"})

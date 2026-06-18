@@ -38,5 +38,23 @@
     <string>AppIcon</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
+    <key>NSServices</key>
+    <array>
+        <dict>
+            <key>NSSendTypes</key>
+            <array>
+                <string>NSStringPboardType</string>
+            </array>
+            <key>NSMenuItem</key>
+            <dict>
+                <key>default</key>
+                <string>TypelessMLX: 翻译</string>
+            </dict>
+            <key>NSMessage</key>
+            <string>lookupSelectedText</string>
+            <key>NSPortName</key>
+            <string>TypelessMLX</string>
+        </dict>
+    </array>
 </dict>
 </plist>
