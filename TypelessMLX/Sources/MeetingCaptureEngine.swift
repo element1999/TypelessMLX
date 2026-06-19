@@ -201,22 +201,25 @@ class MeetingCaptureEngine: NSObject {
     }
 
     private func handleSubtitleChunk(_ chunk: WhisperBridge.SubtitleChunk) {
-        // Commit any eagerly-translated complete sentences first
-        for pair in chunk.eagerSentences {
-            transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
-        }
         if chunk.committed {
-            // Commit the tail (incomplete sentence at utterance end)
+            // Advance pending slot (commit whatever was shown there), then add tail
+            if !chunk.eagerSentences.isEmpty || !chunk.text.isEmpty {
+                transcriptOverlay?.advancePending()
+            }
             if !chunk.text.isEmpty {
                 transcriptOverlay?.commitEntry(english: chunk.text, chinese: chunk.chinese)
             }
             lastPartialText = ""
             lastEnglishSentForTranslation = ""
         } else {
-            // Update live partial preview
-            if !chunk.text.isEmpty, chunk.text != lastPartialText {
-                lastPartialText = chunk.text
+            if let latest = chunk.eagerSentences.last {
+                // Show latest eager sentence in-place (overwrite pending slot, don't advance)
+                transcriptOverlay?.updatePendingEntry(english: latest.en, chinese: latest.zh)
+                lastPartialText = latest.en
+            } else if !chunk.text.isEmpty, chunk.text != lastPartialText {
+                // Raw partial tail — just update live English preview
                 transcriptOverlay?.updateLiveEnglish(chunk.text)
+                lastPartialText = chunk.text
             } else if chunk.text.isEmpty && !chunk.eagerSentences.isEmpty {
                 transcriptOverlay?.clearPending()
             }
