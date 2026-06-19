@@ -39,9 +39,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Check if Python venv is ready; if not, show setup
         checkBackendAndSetup()
 
-        // Pre-warm Apple Foundation Models session if enabled
-        warmUpTextRefinerIfNeeded()
-
         // Setup hotkey (works even before permissions are fully granted)
         HotkeyManager.shared.setup(appState: appState)
 
@@ -137,14 +134,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // If subtitle is enabled but stream not active, retry (e.g. after granting screen capture)
             if self.appState.meetingSubtitleEnabled && !self.appState.isTeamsMeetingActive {
                 MeetingCaptureEngine.shared.setEnabled(true)
-            }
-        }
-    }
-
-    private func warmUpTextRefinerIfNeeded() {
-        if #available(macOS 26, *) {
-            if appState.enableTextRefinement {
-                Task { await TextRefiner.shared.warmUp() }
             }
         }
     }
