@@ -648,7 +648,10 @@ class WhisperBridge {
         env["HF_HOME"] = NSHomeDirectory() + "/.cache/huggingface"
         env["PYTHONUNBUFFERED"] = "1"
         env["HF_HUB_OFFLINE"] = "0"  // override shell setting; downloads must be allowed
-        env.removeValue(forKey: "HF_ENDPOINT")  // use huggingface.co directly; mirrors cause redirect issues
+        // Use hf-mirror.com if no custom endpoint is set in the shell environment
+        if env["HF_ENDPOINT"] == nil {
+            env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        }
         return env
     }
 }
