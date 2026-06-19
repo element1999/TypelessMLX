@@ -579,21 +579,27 @@ def handle_subtitle_stream(req_id: str, req: dict):
         commit = force_commit
 
     if commit:
-        # Translate remaining tail (incomplete sentence at end of utterance)
-        tail_punct = punc_restore(tail) if tail.strip() else ""
-        tail_zh = translate_to_chinese_llm(tail_punct) if (tail_punct.strip() and _llm_translator_ready) else ""
-        # Collect ALL eager sentences for this utterance (for transcript quality)
-        all_utterance = list(_subtitle_utterance_sentences)
+        # For transcript: use the FULL stable ASR text — punc_restore + split + translate fresh.
+        # This gives clean, context-aware output with no duplicates from prefix tracking.
+        full_punct = punc_restore(text) if text.strip() else ""
+        transcript_sents, transcript_tail = _get_completed_sentences(full_punct)
+        if transcript_tail.strip():
+            transcript_sents.append(transcript_tail.strip())
+        utterance_pairs = []
+        for s in transcript_sents:
+            zh = translate_to_chinese_llm(s) if _llm_translator_ready else ""
+            utterance_pairs.append({"en": s, "zh": zh})
+
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
         _subtitle_committed_prefix = ""
         _subtitle_utterance_sentences = []
-        sys.stderr.write(f"[TypelessMLX] Subtitle commit: {len(all_utterance)} total + tail={repr(tail_punct[:40])}\n")
+        sys.stderr.write(f"[TypelessMLX] Subtitle commit: {len(utterance_pairs)} transcript sents, {len(eager_pairs)} new eager\n")
         sys.stderr.flush()
-        send({"id": req_id, "text": tail_punct, "committed": True, "chinese": tail_zh,
-              "eager_sentences": eager_pairs,          # new in this call (for subtitle bar)
-              "utterance_sentences": all_utterance})   # full utterance (for transcript)
+        send({"id": req_id, "text": "", "committed": True, "chinese": "",
+              "eager_sentences": eager_pairs,
+              "utterance_sentences": utterance_pairs})
     else:
         send({"id": req_id, "text": tail, "committed": False, "eager_sentences": eager_pairs})
 

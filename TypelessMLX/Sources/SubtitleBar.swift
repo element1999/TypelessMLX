@@ -27,9 +27,9 @@ class SubtitleBar: NSObject {
         guard !english.isEmpty else { return }
         DispatchQueue.main.async {
             self.ensureWindow()
-            self.englishLabel?.stringValue = english
-            self.englishLabel?.textColor = NSColor(white: 0.72, alpha: 1)
-            self.chineseLabel?.stringValue = ""
+            self.englishLabel?.attributedStringValue = self.outlined(english, size: 17, weight: .semibold,
+                                                                      color: NSColor(white: 0.80, alpha: 1))
+            self.chineseLabel?.attributedStringValue = NSAttributedString(string: "")
             self.scheduleHide()
             self.window?.orderFrontRegardless()
         }
@@ -40,12 +40,22 @@ class SubtitleBar: NSObject {
         guard !english.isEmpty else { return }
         DispatchQueue.main.async {
             self.ensureWindow()
-            self.englishLabel?.stringValue = english
-            self.englishLabel?.textColor = .white
-            self.chineseLabel?.stringValue = chinese
+            self.englishLabel?.attributedStringValue = self.outlined(english, size: 17, weight: .bold,
+                                                                      color: .white)
+            self.chineseLabel?.attributedStringValue = self.outlined(chinese, size: 15, weight: .medium,
+                                                                      color: NSColor(red: 1, green: 0.95, blue: 0.55, alpha: 1))
             self.scheduleHide()
             self.window?.orderFrontRegardless()
         }
+    }
+
+    private func outlined(_ text: String, size: CGFloat, weight: NSFont.Weight, color: NSColor) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .foregroundColor: color,
+            .strokeColor: NSColor(white: 0, alpha: 0.95),
+            .strokeWidth: -3.5,
+            .font: NSFont.systemFont(ofSize: size, weight: weight),
+        ])
     }
 
     func hide() {
@@ -123,13 +133,6 @@ class SubtitleBar: NSObject {
         f.maximumNumberOfLines = 1
         f.isBezeled = false
         f.drawsBackground = false
-        f.wantsLayer = true
-        // Text shadow for readability on any background
-        let shadow = NSShadow()
-        shadow.shadowColor = NSColor(white: 0, alpha: 0.9)
-        shadow.shadowOffset = NSSize(width: 1, height: -1)
-        shadow.shadowBlurRadius = 3
-        f.shadow = shadow
         return f
     }
 }
