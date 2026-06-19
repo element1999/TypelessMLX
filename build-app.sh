@@ -220,9 +220,9 @@ INSTALL_EOF
     }
 
     package_model_archive "qwen3-asr-0.6b"  "mlx-community/Qwen3-ASR-0.6B-8bit"
+    package_model_archive "qwen3-asr-1.7b"  "mlx-community/Qwen3-ASR-1.7B-8bit"
+    package_model_archive "qwen2.5-1.5b-translate" "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
     package_model_archive "whisper-large-v3" "mlx-community/whisper-large-v3-mlx"
-    package_model_archive "whisper-medium"   "mlx-community/whisper-medium-mlx"
-    package_model_archive "whisper-small"    "mlx-community/whisper-small-mlx"
 fi
 
 # ── Step 5: Report ────────────────────────────────────────────────────────────
