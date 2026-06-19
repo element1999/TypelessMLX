@@ -27,9 +27,9 @@ class SubtitleBar: NSObject {
         guard !english.isEmpty else { return }
         DispatchQueue.main.async {
             self.ensureWindow()
-            self.englishLabel?.attributedStringValue = self.outlined(english, size: 17, weight: .semibold,
-                                                                      color: NSColor(white: 0.80, alpha: 1))
-            self.chineseLabel?.attributedStringValue = NSAttributedString(string: "")
+            self.englishLabel?.stringValue = english
+            self.englishLabel?.textColor = NSColor(white: 0.72, alpha: 1)
+            self.chineseLabel?.stringValue = ""
             self.scheduleHide()
             self.window?.orderFrontRegardless()
         }
@@ -40,10 +40,9 @@ class SubtitleBar: NSObject {
         guard !english.isEmpty else { return }
         DispatchQueue.main.async {
             self.ensureWindow()
-            self.englishLabel?.attributedStringValue = self.outlined(english, size: 17, weight: .bold,
-                                                                      color: .white)
-            self.chineseLabel?.attributedStringValue = self.outlined(chinese, size: 15, weight: .medium,
-                                                                      color: NSColor(red: 1, green: 0.95, blue: 0.55, alpha: 1))
+            self.englishLabel?.stringValue = english
+            self.englishLabel?.textColor = .white
+            self.chineseLabel?.stringValue = chinese
             self.scheduleHide()
             self.window?.orderFrontRegardless()
         }
@@ -99,7 +98,7 @@ class SubtitleBar: NSObject {
 
         let container = NSView(frame: NSRect(origin: .zero, size: CGSize(width: w, height: h)))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor.clear.cgColor
+        container.layer?.backgroundColor = NSColor(white: 0.04, alpha: 0.88).cgColor
         container.layer?.cornerRadius = Self.cornerRadius
 
         let enLabel = makeLabel(size: 17, weight: .semibold, color: .white)
