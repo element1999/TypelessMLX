@@ -203,15 +203,14 @@ class MeetingCaptureEngine: NSObject {
 
     private func handleSubtitleChunk(_ chunk: WhisperBridge.SubtitleChunk) {
         if chunk.committed {
-            // Commit all eager sentences to transcript
-            for pair in chunk.eagerSentences {
+            // Transcript: write full utterance once at commit (no duplicates)
+            for pair in chunk.utteranceSentences {
                 transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
             }
-            // Commit tail to transcript (if non-empty)
             if !chunk.text.isEmpty {
                 transcriptOverlay?.commitEntry(english: chunk.text, chinese: chunk.chinese)
             }
-            // Subtitle bar: show tail, or fall back to last eager sentence
+            // Subtitle bar: show tail or last eager sentence
             if !chunk.text.isEmpty {
                 SubtitleBar.shared.commitSentence(english: chunk.text, chinese: chunk.chinese)
             } else if let last = chunk.eagerSentences.last {
@@ -220,10 +219,7 @@ class MeetingCaptureEngine: NSObject {
             lastPartialText = ""
             lastEnglishSentForTranslation = ""
         } else {
-            // Eager sentences: update subtitle bar + add to transcript
-            for pair in chunk.eagerSentences {
-                transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
-            }
+            // Subtitle bar only (not transcript) for real-time eager sentences
             if let latest = chunk.eagerSentences.last {
                 SubtitleBar.shared.commitSentence(english: latest.en, chinese: latest.zh)
                 lastPartialText = latest.en

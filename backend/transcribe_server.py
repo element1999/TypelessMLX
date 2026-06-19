@@ -60,6 +60,7 @@ _subtitle_stable_count: int = 0
 _subtitle_qwen3_model = None
 _subtitle_qwen3_model_path: str | None = None
 _subtitle_committed_prefix: str = ""  # eagerly-translated prefix of current utterance
+_subtitle_utterance_sentences: list = []  # all eager sentences for current utterance
 _SUBTITLE_STABLE_THRESHOLD = 2       # consecutive identical results → commit utterance
 _SUBTITLE_MAX_SAMPLES = 15 * 16000   # 15s max accumulation before force-commit
 _SUBTITLE_MIN_SAMPLES = 8000         # 0.5s minimum before running ASR
@@ -500,6 +501,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
     """Accumulate audio chunks; eagerly translate completed sentences in partials,
     commit remaining tail on VAD-detected silence."""
     global _subtitle_prev_text, _subtitle_stable_count, _subtitle_committed_prefix
+    global _subtitle_utterance_sentences
     import numpy as np
     import tempfile
 
@@ -509,6 +511,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
         _subtitle_committed_prefix = ""
+        _subtitle_utterance_sentences = []
         send({"id": req_id, "text": "", "committed": False})
         return
 
@@ -561,6 +564,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
         zh = translate_to_chinese_llm(s) if _llm_translator_ready else ""
         eager_pairs.append({"en": s, "zh": zh})
         _subtitle_committed_prefix += s
+        _subtitle_utterance_sentences.append({"en": s, "zh": zh})
         sys.stderr.write(f"[TypelessMLX] Eager sentence: {repr(s[:50])}\n")
         sys.stderr.flush()
 
@@ -578,14 +582,18 @@ def handle_subtitle_stream(req_id: str, req: dict):
         # Translate remaining tail (incomplete sentence at end of utterance)
         tail_punct = punc_restore(tail) if tail.strip() else ""
         tail_zh = translate_to_chinese_llm(tail_punct) if (tail_punct.strip() and _llm_translator_ready) else ""
+        # Collect ALL eager sentences for this utterance (for transcript quality)
+        all_utterance = list(_subtitle_utterance_sentences)
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
         _subtitle_committed_prefix = ""
-        sys.stderr.write(f"[TypelessMLX] Subtitle commit: {len(eager_pairs)} eager + tail={repr(tail_punct[:40])}\n")
+        _subtitle_utterance_sentences = []
+        sys.stderr.write(f"[TypelessMLX] Subtitle commit: {len(all_utterance)} total + tail={repr(tail_punct[:40])}\n")
         sys.stderr.flush()
         send({"id": req_id, "text": tail_punct, "committed": True, "chinese": tail_zh,
-              "eager_sentences": eager_pairs})
+              "eager_sentences": eager_pairs,          # new in this call (for subtitle bar)
+              "utterance_sentences": all_utterance})   # full utterance (for transcript)
     else:
         send({"id": req_id, "text": tail, "committed": False, "eager_sentences": eager_pairs})
 

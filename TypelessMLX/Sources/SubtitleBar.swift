@@ -89,7 +89,7 @@ class SubtitleBar: NSObject {
 
         let container = NSView(frame: NSRect(origin: .zero, size: CGSize(width: w, height: h)))
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(white: 0.04, alpha: 0.88).cgColor
+        container.layer?.backgroundColor = NSColor.clear.cgColor
         container.layer?.cornerRadius = Self.cornerRadius
 
         let enLabel = makeLabel(size: 17, weight: .semibold, color: .white)
@@ -123,6 +123,13 @@ class SubtitleBar: NSObject {
         f.maximumNumberOfLines = 1
         f.isBezeled = false
         f.drawsBackground = false
+        f.wantsLayer = true
+        // Text shadow for readability on any background
+        let shadow = NSShadow()
+        shadow.shadowColor = NSColor(white: 0, alpha: 0.9)
+        shadow.shadowOffset = NSSize(width: 1, height: -1)
+        shadow.shadowBlurRadius = 3
+        f.shadow = shadow
         return f
     }
 }

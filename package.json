@@ -1,0 +1,7 @@
+{
+  "name": "@donhu/typeless",
+  "version": "1.0.0",
+  "publishConfig": {
+    "registry": "https://jfrog.gopayinc.com.cn/artifactory/api/npm/npm-gopay-release/"
+  }
+}

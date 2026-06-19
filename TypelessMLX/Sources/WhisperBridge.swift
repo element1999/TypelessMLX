@@ -406,7 +406,8 @@ class WhisperBridge {
         let text: String                            // live partial (incomplete tail)
         let committed: Bool
         let chinese: String                         // translation of committed tail
-        let eagerSentences: [(en: String, zh: String)]  // completed sentences translated inline
+        let eagerSentences: [(en: String, zh: String)]    // new eager sentences this call
+        let utteranceSentences: [(en: String, zh: String)] // all eager for utterance (on commit only)
     }
 
     func streamSubtitle(audioURL: URL?, modelPath: String, reset: Bool = false,
@@ -437,7 +438,7 @@ class WhisperBridge {
             case .success(let jsonStr):
                 guard let data = jsonStr.data(using: .utf8),
                       let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                    completion(.success(SubtitleChunk(text: "", committed: false, chinese: "", eagerSentences: [])))
+                    completion(.success(SubtitleChunk(text: "", committed: false, chinese: "", eagerSentences: [], utteranceSentences: [])))
                     return
                 }
                 let text = json["text"] as? String ?? ""
@@ -450,8 +451,16 @@ class WhisperBridge {
                         return (en: en, zh: d["zh"] ?? "")
                     }
                 }
+                var utterance: [(en: String, zh: String)] = []
+                if let arr = json["utterance_sentences"] as? [[String: String]] {
+                    utterance = arr.compactMap { d in
+                        guard let en = d["en"] else { return nil }
+                        return (en: en, zh: d["zh"] ?? "")
+                    }
+                }
                 completion(.success(SubtitleChunk(text: text, committed: committed,
-                                                  chinese: chinese, eagerSentences: eager)))
+                                                  chinese: chinese, eagerSentences: eager,
+                                                  utteranceSentences: utterance)))
             case .failure(let error):
                 completion(.failure(error))
             }
