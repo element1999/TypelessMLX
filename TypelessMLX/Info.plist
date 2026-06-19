@@ -33,7 +33,15 @@
 <key>NSSpeechRecognitionUsageDescription</key>
     <string>TypelessMLX 使用語音辨識功能在錄音期間顯示即時文字預覽，以及提供 macOS 內建語音辨識選項。</string>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>TypelessMLX 需要屏幕录制权限以捕获 Microsoft Teams 会议音频，用于生成实时中文字幕。</string>
+    <string>TypelessMLX 需要屏幕录制权限以捕获系统音频，用于生成实时双语字幕。</string>
+    <key>NSPhotoLibraryUsageDescription</key>
+    <string>TypelessMLX 使用 Apple Intelligence 框架进行文字修正，该框架会请求此权限。TypelessMLX 本身不读取或保存您的照片。</string>
+    <key>NSDesktopFolderUsageDescription</key>
+    <string>Apple Intelligence 文字修正功能需要访问此目录。TypelessMLX 本身不读取桌面文件。</string>
+    <key>NSDocumentsFolderUsageDescription</key>
+    <string>Apple Intelligence 文字修正功能需要访问此目录。TypelessMLX 本身不读取文稿文件。</string>
+    <key>NSDownloadsFolderUsageDescription</key>
+    <string>Apple Intelligence 文字修正功能需要访问此目录。TypelessMLX 本身不读取下载文件。</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
     <key>NSPrincipalClass</key>

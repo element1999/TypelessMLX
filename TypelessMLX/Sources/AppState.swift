@@ -65,7 +65,7 @@ class AppState: ObservableObject {
     @AppStorage("maxHistoryCount") var maxHistoryCount: Int = 50
     @AppStorage("initialPrompt") var initialPrompt: String = ""
     @AppStorage("inputDeviceUID") var inputDeviceUID: String = ""  // empty = system default
-    @AppStorage("enableTextRefinement") var enableTextRefinement: Bool = true
+    @AppStorage("enableTextRefinement") var enableTextRefinement: Bool = false
     @AppStorage("removeFillers") var removeFillers: Bool = false
     @AppStorage("meetingSubtitleEnabled") var meetingSubtitleEnabled: Bool = false
     @AppStorage("lookupHotkeyKeyCode") var lookupHotkeyKeyCode: Int = 2        // kVK_ANSI_D
