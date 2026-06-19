@@ -192,20 +192,26 @@ class MeetingCaptureEngine: NSObject {
             self.subtitleInFlight = false
             try? FileManager.default.removeItem(at: url)
             switch result {
-            case .success(let (text, committed)):
-                DispatchQueue.main.async { self.handleSubtitleResult(text: text, committed: committed) }
+            case .success(let (text, committed, chinese)):
+                DispatchQueue.main.async { self.handleSubtitleResult(text: text, committed: committed, chinese: chinese) }
             case .failure(let error):
                 logError("MeetingCaptureEngine", "Subtitle stream error: \(error.localizedDescription)")
             }
         }
     }
 
-    private func handleSubtitleResult(text: String, committed: Bool) {
+    private func handleSubtitleResult(text: String, committed: Bool, chinese: String) {
         if committed {
             guard !text.isEmpty else { return }
             transcriptOverlay?.updateLiveEnglish(text)
             lastPartialText = text
-            triggerTranslation(for: text)
+            if !chinese.isEmpty {
+                transcriptOverlay?.commitEntry(english: text, chinese: chinese)
+                lastPartialText = ""
+                lastEnglishSentForTranslation = ""
+            } else {
+                triggerTranslation(for: text)
+            }
         } else {
             guard !text.isEmpty, text != lastPartialText else { return }
             lastPartialText = text

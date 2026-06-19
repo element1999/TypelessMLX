@@ -286,11 +286,12 @@ class WhisperBridge {
         let elapsed = Date().timeIntervalSince(context.startTime)
         logInfo("WhisperBridge", "\(context.label) latency: \(String(format: "%.2f", elapsed))s")
 
-        // SubtitleStream response: has "committed" field → encode text\u{0001}0/1
+        // SubtitleStream response: has "committed" field → encode text\u{0001}0/1\u{0001}chinese
         if json.keys.contains("committed") {
             let text = json["text"] as? String ?? ""
             let committed = json["committed"] as? Bool ?? false
-            let encoded = "\(text)\u{0001}\(committed ? "1" : "0")"
+            let chinese = json["chinese"] as? String ?? ""
+            let encoded = "\(text)\u{0001}\(committed ? "1" : "0")\u{0001}\(chinese)"
             DispatchQueue.main.async { context.completion(.success(encoded)) }
             return
         }
@@ -404,7 +405,7 @@ class WhisperBridge {
     }
 
     func streamSubtitle(audioURL: URL?, modelPath: String, reset: Bool = false,
-                        completion: @escaping (Result<(text: String, committed: Bool), Error>) -> Void) {
+                        completion: @escaping (Result<(text: String, committed: Bool, chinese: String), Error>) -> Void) {
         lock.lock()
         guard isReady else {
             lock.unlock()
@@ -430,10 +431,11 @@ class WhisperBridge {
             switch result {
             case .success(let encoded):
                 let parts = encoded.components(separatedBy: "\u{0001}")
-                if parts.count == 2 {
-                    completion(.success((text: parts[0], committed: parts[1] == "1")))
+                if parts.count >= 2 {
+                    let chinese = parts.count >= 3 ? parts[2] : ""
+                    completion(.success((text: parts[0], committed: parts[1] == "1", chinese: chinese)))
                 } else {
-                    completion(.success((text: encoded, committed: false)))
+                    completion(.success((text: encoded, committed: false, chinese: "")))
                 }
             case .failure(let error):
                 completion(.failure(error))

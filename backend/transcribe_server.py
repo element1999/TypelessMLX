@@ -59,7 +59,7 @@ _subtitle_prev_text: str = ""
 _subtitle_stable_count: int = 0
 _subtitle_qwen3_model = None
 _subtitle_qwen3_model_path: str | None = None
-_SUBTITLE_STABLE_THRESHOLD = 3       # consecutive identical results → commit utterance
+_SUBTITLE_STABLE_THRESHOLD = 2       # consecutive identical results → commit utterance
 _SUBTITLE_MAX_SAMPLES = 15 * 16000   # 15s max accumulation before force-commit
 _SUBTITLE_MIN_SAMPLES = 8000         # 0.5s minimum before running ASR
 
@@ -521,12 +521,13 @@ def handle_subtitle_stream(req_id: str, req: dict):
     if commit:
         committed_text = _subtitle_prev_text or text
         committed_text = punc_restore(committed_text)
+        chinese = translate_to_chinese_llm(committed_text) if _llm_translator_ready else ""
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
         sys.stderr.write(f"[TypelessMLX] Subtitle committed: {repr(committed_text[:60])}\n")
         sys.stderr.flush()
-        send({"id": req_id, "text": committed_text, "committed": True})
+        send({"id": req_id, "text": committed_text, "committed": True, "chinese": chinese})
     else:
         send({"id": req_id, "text": text, "committed": False})
 
