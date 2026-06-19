@@ -34,6 +34,11 @@ class MeetingCaptureEngine: NSObject {
     private static let translationDebounce: TimeInterval = 1.0
     private static let maxTranslationChars: Int = 150
 
+    // Guards async permission/start callbacks so "stop" cannot be raced by delayed callbacks.
+    private let enableStateLock = NSLock()
+    private var subtitleEnabled = false
+    private var enableToken: UInt64 = 0
+
     private override init() { super.init() }
 
     // MARK: - Lifecycle
@@ -52,36 +57,53 @@ class MeetingCaptureEngine: NSObject {
     }
 
     func setEnabled(_ enabled: Bool) {
+        enableStateLock.lock()
+        subtitleEnabled = enabled
+        enableToken &+= 1
+        let token = enableToken
+        enableStateLock.unlock()
+
         if enabled {
-            checkPermissionsAndStart()
+            checkPermissionsAndStart(token: token)
         } else {
             stopAll()
             transcriptOverlay?.hide()
         }
     }
 
+    private func canProceed(token: UInt64) -> Bool {
+        enableStateLock.lock()
+        let ok = subtitleEnabled && enableToken == token
+        enableStateLock.unlock()
+        return ok
+    }
+
     // MARK: - Permission
 
-    private func checkPermissionsAndStart() {
+    private func checkPermissionsAndStart(token: UInt64) {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
+            guard let self = self else { return }
+            guard self.canProceed(token: token) else { return }
+
             if let error = error {
                 logError("MeetingCaptureEngine", "Screen capture access denied: \(error.localizedDescription)")
-                DispatchQueue.main.async { self?.appState?.hasScreenCapturePermission = false }
+                DispatchQueue.main.async { self.appState?.hasScreenCapturePermission = false }
                 return
             }
-            DispatchQueue.main.async { self?.appState?.hasScreenCapturePermission = true }
+            DispatchQueue.main.async { self.appState?.hasScreenCapturePermission = true }
             guard let display = content?.displays.first(where: { $0.displayID == CGMainDisplayID() })
                                 ?? content?.displays.first else {
                 logError("MeetingCaptureEngine", "No display found")
                 return
             }
-            self?.startStream(display: display)
+            self.startStream(display: display, token: token)
         }
     }
 
     // MARK: - SCStream
 
-    private func startStream(display: SCDisplay) {
+    private func startStream(display: SCDisplay, token: UInt64) {
+        guard canProceed(token: token) else { return }
         streamLock.lock()
         guard activeStream == nil else { streamLock.unlock(); return }
         streamLock.unlock()
@@ -106,17 +128,23 @@ class MeetingCaptureEngine: NSObject {
         }
 
         stream.startCapture { [weak self] error in
+            guard let self = self else { return }
+            guard self.canProceed(token: token) else {
+                stream.stopCapture { _ in }
+                return
+            }
+
             if let error = error {
                 logError("MeetingCaptureEngine", "startCapture failed: \(error)")
                 return
             }
-            self?.streamLock.lock()
-            self?.activeStream = stream
-            self?.streamLock.unlock()
+            self.streamLock.lock()
+            self.activeStream = stream
+            self.streamLock.unlock()
             logInfo("MeetingCaptureEngine", "Capturing all system audio")
             DispatchQueue.main.async {
-                self?.appState?.isTeamsMeetingActive = true
-                self?.startSubtitleStreaming()
+                self.appState?.isTeamsMeetingActive = true
+                self.startSubtitleStreaming()
             }
         }
     }
