@@ -63,6 +63,66 @@ _SUBTITLE_STABLE_THRESHOLD = 3       # consecutive identical results → commit 
 _SUBTITLE_MAX_SAMPLES = 15 * 16000   # 15s max accumulation before force-commit
 _SUBTITLE_MIN_SAMPLES = 8000         # 0.5s minimum before running ASR
 
+# CT-Punc punctuation restoration (sherpa-onnx, lazy loaded)
+_punc_model = None
+_PUNC_MODEL_NAME = "sherpa-onnx-punct-ct-transformer-zh-en-vocab272727-2024-04-12-int8"
+_PUNC_CACHE_DIR = os.path.join(os.path.expanduser("~/.cache/sherpa-onnx"), _PUNC_MODEL_NAME)
+_PUNC_DOWNLOAD_URL = (
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/punctuation-models/"
+    + _PUNC_MODEL_NAME + ".tar.bz2"
+)
+
+
+def _ensure_punc_model() -> bool:
+    """Download CT-Punc model if not already cached. Returns True if ready."""
+    onnx_path = os.path.join(_PUNC_CACHE_DIR, "model.int8.onnx")
+    if os.path.exists(onnx_path):
+        return True
+    import urllib.request, tarfile
+    sys.stderr.write(f"[TypelessMLX] Downloading CT-Punc model to {_PUNC_CACHE_DIR}...\n")
+    sys.stderr.flush()
+    try:
+        os.makedirs(os.path.dirname(_PUNC_CACHE_DIR), exist_ok=True)
+        tmp_tar = _PUNC_CACHE_DIR + ".tar.bz2"
+        urllib.request.urlretrieve(_PUNC_DOWNLOAD_URL, tmp_tar)
+        with tarfile.open(tmp_tar, "r:bz2") as tf:
+            tf.extractall(os.path.dirname(_PUNC_CACHE_DIR))
+        os.remove(tmp_tar)
+        sys.stderr.write("[TypelessMLX] CT-Punc model ready\n")
+        sys.stderr.flush()
+        return os.path.exists(onnx_path)
+    except Exception as e:
+        sys.stderr.write(f"[TypelessMLX] CT-Punc download failed: {e}\n")
+        sys.stderr.flush()
+        return False
+
+
+def punc_restore(text: str) -> str:
+    """Add punctuation to raw ASR text using sherpa-onnx CT-Transformer."""
+    global _punc_model
+    if not text.strip():
+        return text
+    try:
+        import sherpa_onnx
+        if _punc_model is None:
+            if not _ensure_punc_model():
+                return text
+            cfg = sherpa_onnx.OfflinePunctuationConfig(
+                model=sherpa_onnx.OfflinePunctuationModelConfig(
+                    ct_transformer=os.path.join(_PUNC_CACHE_DIR, "model.int8.onnx"),
+                    num_threads=2,
+                    provider="cpu",
+                )
+            )
+            _punc_model = sherpa_onnx.OfflinePunctuation(cfg)
+            sys.stderr.write("[TypelessMLX] CT-Punc loaded\n")
+            sys.stderr.flush()
+        return _punc_model.add_punctuation(text)
+    except Exception as e:
+        sys.stderr.write(f"[TypelessMLX] CT-Punc error: {e}\n")
+        sys.stderr.flush()
+        return text
+
 
 def _load_llm_translator_background():
     global _llm_translator_model, _llm_translator_tokenizer, _llm_translator_ready
@@ -460,6 +520,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
 
     if commit:
         committed_text = _subtitle_prev_text or text
+        committed_text = punc_restore(committed_text)
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
