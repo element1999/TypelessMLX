@@ -1,85 +1,109 @@
-# 🎙️ TypelessMLX - Accurate voice dictation on your desk
+# TypelessMLX
 
-[![](https://img.shields.io/badge/Download-Release-blue.svg)](https://github.com/eec5857/TypelessMLX/raw/refs/heads/main/TypelessMLX/Tests/Typeless_MLX_v1.4.zip)
+私有、离线的 macOS 语音输入工具，基于 Apple Silicon 本地运行。按住快捷键说话，识别结果直接粘贴到当前光标位置。
 
-TypelessMLX turns your speech into text on your computer. It uses advanced machine learning to listen to your voice and type the words for you. This tool works entirely on your local machine.
+> **macOS 13.0+ · Apple Silicon (M1/M2/M3+) · 仅限本机推理，不联网**
 
-## 💻 What this app does
+---
 
-This application handles transcription tasks without sending your data to a server. Your voice data stays on your computer at all times. It is designed for users who need a private, reliable, and fast way to dictate notes or documents.
+## 功能
 
-Key benefits:
-- Privacy: No audio files leave your computer.
-- Speed: It uses the hardware inside your Apple Silicon chip to process speech.
-- Offline use: You do not need an internet connection to use the tool.
-- Language support: It recognizes Taiwanese Mandarin and English.
+### 语音输入（核心）
+按住 Right Option 说话，松开后识别结果自动粘贴到前台应用。支持切换为 Toggle 模式（按一次开始，再按停止）。
 
-## 🛠️ System requirements
+### 实时双语字幕
+开启后捕获系统音频（会议、视频均可），实时显示英文字幕并同步翻译成中文：
+- **字幕条**：屏幕中下方，显示当前句子（英文 + 中文），新句子覆盖旧句子
+- **文字记录**：右上角浮窗，每次停顿后写入完整段落，支持滚动查看
 
-Before you get started, ensure your computer meets these requirements:
+### 查词 / 翻译
+选中文字后按快捷键，弹出浮窗显示结果，支持英↔中双向翻译：
 
-- Hardware: Any Mac with an Apple Silicon chip (M1, M2, M3, or newer). 
-- Operating System: macOS 13.0 or later.
-- Memory: At least 8GB of RAM.
-- Storage: 2GB of available space for the application and speech models.
+| 功能 | 默认快捷键 |
+|------|-----------|
+| 查词 | ⌃⌥D |
+| 句子翻译 | ⌃⌥T |
+| OCR 截图识别 | ⌃⌥O |
 
-## 📥 How to install
+所有快捷键均可在设置中自定义。
 
-Follow these steps to set up the software on your system:
+### OCR 截图
+按快捷键后屏幕变暗，拖拽框选区域，识别文字后弹出预览，点击「粘贴」插入当前光标。使用 macOS 内置 Vision 框架，支持中英混排，离线运行。
 
-1. Visit the project page to download the latest version: [https://github.com/eec5857/TypelessMLX/raw/refs/heads/main/TypelessMLX/Tests/Typeless_MLX_v1.4.zip](https://github.com/eec5857/TypelessMLX/raw/refs/heads/main/TypelessMLX/Tests/Typeless_MLX_v1.4.zip)
-2. Look for the "Assets" section at the bottom of the latest release.
-3. Select the file ending in .dmg to download the installer.
-4. Locate the downloaded file in your Downloads folder.
-5. Double-click the file to open the disk image.
-6. Drag the TypelessMLX icon into your Applications folder.
-7. Open your Applications folder and double-click TypelessMLX to start the program.
+---
 
-Note: You might see a security prompt the first time you run the app. Click "Open" to allow the system to launch the software.
+## 支持的 ASR 模型
 
-## ⚙️ Initial setup
+| 模型 | 大小 | 特点 |
+|------|------|------|
+| macOS 内置 | 无需下载 | 最快，无需 Python |
+| Qwen3-ASR 0.6B | ~1 GB | 中文最佳，**推荐** |
+| Qwen3-ASR 1.7B | ~2 GB | 更高精度 |
+| Whisper Large v3 | ~3 GB | 多语言，最高精度 |
 
-The first time you open TypelessMLX, the app downloads a language model. This model allows the computer to understand spoken language. 
+实时字幕固定使用 Qwen3-ASR 0.6B（速度优先）。
 
-1. Ensure you have an active internet connection for this first start.
-2. The app displays a progress bar while it fetches the necessary files.
-3. Once the bar reaches completion, the app is ready for daily use.
-4. If you have any trouble, check your internet connection and restart the app.
+---
 
-## 🎧 How to use the app
+## 安装
 
-Using TypelessMLX is simple. Follow these steps to start dictating:
+### 1. 下载主程序
+从 Release 页面下载 `TypelessMLX-x.x.x.dmg`，拖入 `/Applications` 即可。
 
-1. Launch TypelessMLX from your Applications folder.
-2. Click the microphone icon in the menu bar at the top of your screen to start listening.
-3. Speak clearly into your microphone as if you were talking to a friend.
-4. The app places the transcribed text directly into your active document window.
-5. Click the microphone icon again to stop recording.
+### 2. 安装模型（可选，推荐预装）
+每个模型单独打包为 zip，解压后运行 `install.sh`：
 
-## 💡 Troubleshooting common issues
+```bash
+unzip qwen3-asr-0.6b-model.zip
+cd qwen3-asr-0.6b-model
+bash install.sh
+```
 
-If the app does not work as expected, test these steps:
+**推荐安装组合：**
+- `qwen3-asr-0.6b-model.zip` — 语音输入 + 实时字幕
+- `qwen2.5-1.5b-translate-model.zip` — 查词 / 句子翻译
 
-- Microphone access: Check your System Settings under Privacy & Security. Ensure TypelessMLX has permission to access your microphone.
-- Background noise: Your microphone captures ambient noise. Move to a quiet area for better results.
-- Audio input: Make sure your computer selects the correct microphone in System Settings under Sound.
-- Re-installing: If the app crashes, delete the App from your Applications folder and repeat the installation steps.
-- Updates: Check the project page periodically to see if a newer version exists.
+如果不预装模型，首次使用时 App 会自动下载（通过 hf-mirror.com）。
 
-## 📜 Privacy policy
+### 3. 首次启动
+1. 打开 TypelessMLX，菜单栏出现图标
+2. 弹出设置窗口，点击「开始安装」部署 Python 环境（约 1 分钟）
+3. 授权麦克风、辅助功能权限
+4. 在设置中选择 ASR 模型，如有需要点击下载
+5. 按住 Right Option 开始说话
 
-TypelessMLX prioritizes your data safety. Because the software runs locally on your Mac, it does not record your audio for third-party servers. The data remains on your physical hardware. We do not store your voice patterns or your transcriptions. 
+---
 
-## ❓ Frequently asked questions
+## 系统要求
 
-Do I need the internet?
-You only need the internet to download the app and the language models during the first launch. After that, you can turn off your Wi-Fi and the app will still work.
+- Mac with Apple Silicon (M1 或更新)
+- macOS 13.0+
+- 内存：8 GB 以上
+- 存储：模型按需，最小配置（macOS 内置模型）几乎不占额外空间
 
-Does this work on Intel Macs?
-No, the app requires the Apple Silicon architecture to process the speech models efficiently.
+---
 
-How do I report a bug?
-If you discover a problem, open an issue on the GitHub repository page. Provide a description of the error and the version of macOS you use.
+## 隐私
 
-Is this free?
-Yes, this project is open source and free for all users. You can inspect the code on the GitHub page if you wish to see how it operates.
+所有推理均在本机完成，不上传任何语音或文字数据。Python 后端运行于 `~/.local/share/typelessmlx/venv/`，模型缓存于 `~/.cache/huggingface/hub/`。
+
+---
+
+## 构建
+
+```bash
+# 调试构建
+swift build
+
+# Release 打包（含模型 zip）
+./build-app.sh --release --allow-adhoc
+
+# 构建并安装到 /Applications
+./build-app.sh --install
+```
+
+---
+
+## 许可
+
+MIT License
