@@ -52,6 +52,28 @@ _TRANSLATE_MODEL = "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
 _llm_translator_model = None
 _llm_translator_tokenizer = None
 _llm_translator_ready = False
+_llm_translator_model_path = _TRANSLATE_MODEL  # track which model is currently loaded
+
+
+def _load_text_model(model_path: str):
+    """Load (or reload) the LLM used for translation and lookup."""
+    global _llm_translator_model, _llm_translator_tokenizer
+    global _llm_translator_ready, _llm_translator_model_path
+    if _llm_translator_ready and _llm_translator_model_path == model_path:
+        return
+    try:
+        from mlx_lm import load
+        sys.stderr.write(f"[TypelessMLX] Loading text model: {model_path}\n")
+        sys.stderr.flush()
+        _llm_translator_ready = False
+        _llm_translator_model, _llm_translator_tokenizer = load(model_path)
+        _llm_translator_model_path = model_path
+        _llm_translator_ready = True
+        sys.stderr.write("[TypelessMLX] Text model ready\n")
+        sys.stderr.flush()
+    except Exception as e:
+        sys.stderr.write(f"[TypelessMLX] Text model load failed: {e}\n")
+        sys.stderr.flush()
 
 # Subtitle stream session state (module-level, server is single-threaded)
 _subtitle_buffer: list = []          # list of np.ndarray float32 at 16kHz
@@ -141,18 +163,7 @@ def punc_restore(text: str) -> str:
 
 
 def _load_llm_translator_background():
-    global _llm_translator_model, _llm_translator_tokenizer, _llm_translator_ready
-    try:
-        from mlx_lm import load
-        sys.stderr.write(f"[TypelessMLX] Loading LLM translator: {_TRANSLATE_MODEL}\n")
-        sys.stderr.flush()
-        _llm_translator_model, _llm_translator_tokenizer = load(_TRANSLATE_MODEL)
-        _llm_translator_ready = True
-        sys.stderr.write("[TypelessMLX] LLM translator ready\n")
-        sys.stderr.flush()
-    except Exception as e:
-        sys.stderr.write(f"[TypelessMLX] LLM translator load failed: {e}\n")
-        sys.stderr.flush()
+    _load_text_model(_TRANSLATE_MODEL)
 
 
 _SENT_END = re.compile(r'([。！？!?]+|\.(?=\s|$))')
@@ -696,6 +707,9 @@ def main():
                 if not text.strip():
                     send({"id": req_id, "text": "", "error": None})
                     continue
+                text_model = req.get("text_model")
+                if text_model:
+                    _load_text_model(text_model)
                 # Auto-detect direction: >30% CJK → Chinese→English, else English→Chinese
                 cjk = sum(1 for c in text if '一' <= c <= '鿿')
                 is_chinese = cjk / max(len(text.strip()), 1) > 0.3
@@ -714,6 +728,9 @@ def main():
                 if not text.strip():
                     send({"id": req_id, "text": "", "error": None})
                     continue
+                text_model = req.get("text_model")
+                if text_model:
+                    _load_text_model(text_model)
                 entry = lookup_word_llm(text)
                 send({"id": req_id, "text": entry, "error": None})
 

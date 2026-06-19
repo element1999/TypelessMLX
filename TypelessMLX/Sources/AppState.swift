@@ -93,6 +93,12 @@ class AppState: ObservableObject {
             isLocal: false, modelType: "qwen3"
         ),
         MLXModel(
+            id: "qwen3-asr-1.7b",
+            repoOrPath: "mlx-community/Qwen3-ASR-1.7B-8bit",
+            description: "Qwen3-ASR 1.7B（更高精度，~2GB）",
+            isLocal: false, modelType: "qwen3"
+        ),
+        MLXModel(
             id: "whisper-large-v3",
             repoOrPath: "mlx-community/whisper-large-v3-mlx",
             description: "Whisper Large v3（多语言，3.1GB，最高精度）",
@@ -139,6 +145,14 @@ class AppState: ObservableObject {
             if let bundled = Self.bundledModelPath(for: m) { return bundled }
         }
         return "mlx-community/whisper-large-v3-mlx"
+    }
+
+    /// Text model for lookup / translation — scales with selected ASR model.
+    var resolvedTextModelPath: String {
+        switch selectedModelID {
+        case "qwen3-asr-1.7b": return "mlx-community/Qwen3-1.7B-4bit"
+        default:               return "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        }
     }
 
     private init() {

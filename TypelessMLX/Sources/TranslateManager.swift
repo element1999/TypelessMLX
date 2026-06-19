@@ -39,7 +39,8 @@ class TranslateManager {
         }
 
         guard appState?.hasPythonBackend == true else { return }
-        WhisperBridge.shared.translate(text: trimmed) { [weak self] result in
+        WhisperBridge.shared.translate(text: trimmed,
+                                       textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
             let translation = (try? result.get()) ?? ""
             logInfo("TranslateManager", "translation: \(translation.prefix(60))")
             DispatchQueue.main.async { self?.overlay?.setContent(translation) }

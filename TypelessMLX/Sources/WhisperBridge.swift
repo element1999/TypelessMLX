@@ -368,7 +368,8 @@ class WhisperBridge {
         queueRequest(payload: request, timeout: 180.0, label: "Subtitle", completion: wrapped)
     }
 
-    func lookup(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+    func lookup(text: String, textModel: String? = nil,
+                completion: @escaping (Result<String, Error>) -> Void) {
         lock.lock()
         guard isReady else {
             lock.unlock()
@@ -381,11 +382,13 @@ class WhisperBridge {
 
         resetIdleTimer()
 
-        let request: [String: Any] = ["action": "lookup", "text": text]
+        var request: [String: Any] = ["action": "lookup", "text": text]
+        if let model = textModel { request["text_model"] = model }
         queueRequest(payload: request, timeout: 30.0, label: "Lookup", completion: completion)
     }
 
-    func translate(text: String, completion: @escaping (Result<String, Error>) -> Void) {
+    func translate(text: String, textModel: String? = nil,
+                   completion: @escaping (Result<String, Error>) -> Void) {
         lock.lock()
         guard isReady else {
             lock.unlock()
@@ -398,7 +401,8 @@ class WhisperBridge {
 
         resetIdleTimer()
 
-        let request: [String: Any] = ["action": "translate", "text": text]
+        var request: [String: Any] = ["action": "translate", "text": text]
+        if let model = textModel { request["text_model"] = model }
         queueRequest(payload: request, timeout: 30.0, label: "Translate", completion: completion)
     }
 

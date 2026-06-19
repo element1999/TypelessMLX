@@ -164,8 +164,6 @@ class MeetingCaptureEngine: NSObject {
     }
 
     private var subtitleModelPath: String {
-        let model = AppState.shared.selectedModel
-        if model.modelType == "qwen3" { return AppState.shared.resolvedModelPath }
         return "mlx-community/Qwen3-ASR-0.6B-8bit"
     }
 
