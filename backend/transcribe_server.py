@@ -61,6 +61,11 @@ def _load_text_model(model_path: str):
     global _llm_translator_ready, _llm_translator_model_path
     if _llm_translator_ready and _llm_translator_model_path == model_path:
         return
+    # Preserve current state so we can roll back on failure
+    prev_model = _llm_translator_model
+    prev_tok = _llm_translator_tokenizer
+    prev_ready = _llm_translator_ready
+    prev_path = _llm_translator_model_path
     try:
         from mlx_lm import load
         sys.stderr.write(f"[TypelessMLX] Loading text model: {model_path}\n")
@@ -74,6 +79,11 @@ def _load_text_model(model_path: str):
     except Exception as e:
         sys.stderr.write(f"[TypelessMLX] Text model load failed: {e}\n")
         sys.stderr.flush()
+        # Roll back to previous working model
+        _llm_translator_model = prev_model
+        _llm_translator_tokenizer = prev_tok
+        _llm_translator_ready = prev_ready
+        _llm_translator_model_path = prev_path
 
 # Subtitle stream session state (module-level, server is single-threaded)
 _subtitle_buffer: list = []          # list of np.ndarray float32 at 16kHz
