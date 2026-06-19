@@ -10,8 +10,55 @@ class TranscriptOverlay {
 
     private var window: NSWindow?
     private var textView: NSTextView?
+    private var pendingLocation: Int = 0   // start of current live (unconfirmed) entry
 
     // MARK: - Public API
+
+    /// Update the live partial English line at the bottom (called every ~300ms while speaking).
+    func updateLiveEnglish(_ text: String) {
+        guard !text.isEmpty else { return }
+        DispatchQueue.main.async {
+            if self.window == nil { self.createWindow() }
+            guard let storage = self.textView?.textStorage else { return }
+            let pendingLen = storage.length - self.pendingLocation
+            let liveAttr = self.attr(text + "\n", color: NSColor(white: 0.72, alpha: 1), size: 14)
+            storage.replaceCharacters(in: NSRange(location: self.pendingLocation, length: pendingLen),
+                                      with: liveAttr)
+            self.textView?.scrollToEndOfDocument(nil)
+            self.window?.orderFrontRegardless()
+        }
+    }
+
+    /// Finalize the current live entry with Chinese translation, then advance the pending marker.
+    func commitEntry(english: String, chinese: String) {
+        guard !english.isEmpty else { return }
+        DispatchQueue.main.async {
+            if self.window == nil { self.createWindow() }
+            guard let storage = self.textView?.textStorage else { return }
+            let chunk = NSMutableAttributedString()
+            chunk.append(self.attr(english + "\n", color: .white, size: 14))
+            if !chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                chunk.append(self.attr(chinese + "\n", color: NSColor(white: 0.65, alpha: 1), size: 13))
+            }
+            let pendingLen = storage.length - self.pendingLocation
+            storage.replaceCharacters(in: NSRange(location: self.pendingLocation, length: pendingLen),
+                                      with: chunk)
+            self.pendingLocation = storage.length
+            self.textView?.scrollToEndOfDocument(nil)
+            self.window?.orderFrontRegardless()
+        }
+    }
+
+    /// Remove unconfirmed live text (called on session restart when no translation arrived).
+    func clearPending() {
+        DispatchQueue.main.async {
+            guard let storage = self.textView?.textStorage else { return }
+            let pendingLen = storage.length - self.pendingLocation
+            guard pendingLen > 0 else { return }
+            storage.replaceCharacters(in: NSRange(location: self.pendingLocation, length: pendingLen),
+                                      with: NSAttributedString())
+        }
+    }
 
     func appendEntry(english: String, chinese: String, newParagraph: Bool) {
         guard !english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -21,6 +68,7 @@ class TranscriptOverlay {
     func clear() {
         DispatchQueue.main.async {
             self.textView?.textStorage?.setAttributedString(NSAttributedString(string: ""))
+            self.pendingLocation = 0
         }
     }
 

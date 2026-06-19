@@ -74,16 +74,16 @@ def translate_to_chinese_llm(text: str) -> str:
         return ""
     try:
         from mlx_lm import generate
+        # Put the instruction inside the user turn for small models that ignore system prompts
         messages = [
-            {"role": "system", "content": "你是一名翻译。将用户发送的英文翻译成简体中文。只输出译文，不要解释，不要重复原文。"},
-            {"role": "user", "content": text},
+            {"role": "user", "content": f"将以下英文翻译成简体中文，只输出中文译文，不要输出英文：\n{text}"},
         ]
         tok = _llm_translator_tokenizer
         if hasattr(tok, "apply_chat_template"):
             prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         else:
             prompt = f"将以下英文翻译成简体中文，只输出译文：{text}"
-        result = generate(_llm_translator_model, tok, prompt=prompt, max_tokens=300, verbose=False)
+        result = generate(_llm_translator_model, tok, prompt=prompt, max_tokens=400, verbose=False)
         result = result.strip()
         sys.stderr.write(f"[TypelessMLX] LLM translate result: {repr(result[:80])}\n")
         sys.stderr.flush()
@@ -335,6 +335,12 @@ def translate_to_english_llm(text: str) -> str:
 def main():
     import threading
     import mlx_whisper  # pre-load before background threads start to avoid import-lock races
+    # Pre-import mlx_lm on the main thread so the background loader and request handler
+    # don't race on Python's importlib lock, which causes the deadlock seen in practice.
+    try:
+        from mlx_lm import load as _mlx_lm_load, generate as _mlx_lm_generate  # noqa: F401
+    except ImportError:
+        pass
     threading.Thread(target=_load_llm_translator_background, daemon=True).start()
 
     # Signal Swift that we're ready

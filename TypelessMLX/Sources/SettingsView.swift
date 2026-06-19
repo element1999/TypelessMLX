@@ -322,7 +322,6 @@ struct ModelSettingsTab: View {
                     Text("中文（简体）").tag("zh")
                     Text("英文").tag("en")
                     Text("日文").tag("ja")
-                    Text("韩文").tag("ko")
                 }
             }
 

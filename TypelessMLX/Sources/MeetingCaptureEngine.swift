@@ -10,13 +10,13 @@ class MeetingCaptureEngine: NSObject {
     static let shared = MeetingCaptureEngine()
 
     private weak var appState: AppState?
-    private var subtitleOverlay: SubtitleOverlay?
+    private var transcriptOverlay: TranscriptOverlay?
 
     // SCStream
     private let streamLock = NSLock()
     private var activeStream: SCStream?
 
-    // Speech recognition (main-thread owned, requestLock guards cross-thread access)
+    // Speech recognition — requestLock guards cross-thread access to _recognitionRequest
     private let requestLock = NSLock()
     private var _recognitionRequest: SFSpeechAudioBufferRecognitionRequest?
     private var recognitionTask: SFSpeechRecognitionTask?
@@ -27,13 +27,12 @@ class MeetingCaptureEngine: NSObject {
     private var translationTimer: Timer?
     private var translationGeneration: Int = 0
     private var lastPartialText: String = ""
-    private var sessionLastEnglish: String = ""
-    private var sessionLastChinese: String = ""
+    private var lastEnglishSentForTranslation: String = ""
+    private var lastRestartTime: Date = .distantPast
 
     private static let sessionDuration: TimeInterval = 50.0
-    private static let translationDebounce: TimeInterval = 2.0
-    private static let maxDisplayChars: Int = 150
-    private static let maxTranslationChars: Int = 300
+    private static let translationDebounce: TimeInterval = 1.0
+    private static let maxTranslationChars: Int = 150
 
     private override init() { super.init() }
 
@@ -41,14 +40,14 @@ class MeetingCaptureEngine: NSObject {
 
     func setup(appState: AppState) {
         self.appState = appState
-        self.subtitleOverlay = SubtitleOverlay()
+        self.transcriptOverlay = TranscriptOverlay()
         appState.meetingSubtitleEnabled = false
         logInfo("MeetingCaptureEngine", "Setup complete")
     }
 
     func stop() {
         stopAll()
-        subtitleOverlay?.hide()
+        transcriptOverlay?.hide()
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -56,7 +55,7 @@ class MeetingCaptureEngine: NSObject {
             checkPermissionsAndStart()
         } else {
             stopAll()
-            subtitleOverlay?.hide()
+            transcriptOverlay?.hide()
         }
     }
 
@@ -146,15 +145,25 @@ class MeetingCaptureEngine: NSObject {
     // MARK: - Speech recognition (main thread)
 
     private func startRecognition() {
-        // Push last session's text to history row before resetting
-        if !sessionLastEnglish.isEmpty {
-            subtitleOverlay?.advanceToHistory(english: sessionLastEnglish, chinese: sessionLastChinese)
-        }
+        // Guard against rapid-fire restarts (e.g. immediate error loop)
+        let now = Date()
+        guard now.timeIntervalSince(lastRestartTime) > 1.0 else { return }
+        lastRestartTime = now
 
+        restartTimer?.invalidate()
+        translationTimer?.invalidate()
+        restartTimer = nil
+        translationTimer = nil
+
+        // Commit any pending live text as English-only so history is preserved on restart
+        if !lastPartialText.isEmpty {
+            transcriptOverlay?.commitEntry(english: lastPartialText, chinese: "")
+        } else {
+            transcriptOverlay?.clearPending()
+        }
         stopRecognition()
         lastPartialText = ""
-        sessionLastEnglish = ""
-        sessionLastChinese = ""
+        lastEnglishSentForTranslation = ""
 
         let recognizer = SFSpeechRecognizer(locale: Locale(identifier: "en-US"))
         guard recognizer?.isAvailable == true else {
@@ -165,7 +174,7 @@ class MeetingCaptureEngine: NSObject {
 
         let request = SFSpeechAudioBufferRecognitionRequest()
         request.shouldReportPartialResults = true
-        request.requiresOnDeviceRecognition = true
+        // Don't force on-device — let the framework decide; falls back to server if model unavailable
 
         requestLock.lock()
         _recognitionRequest = request
@@ -175,25 +184,24 @@ class MeetingCaptureEngine: NSObject {
             guard let self = self else { return }
             if let result = result {
                 let text = result.bestTranscription.formattedString
-                DispatchQueue.main.async { self.handleRecognitionResult(text, isFinal: result.isFinal) }
+                DispatchQueue.main.async { self.handleRecognitionResult(text) }
             }
-            if error != nil {
+            if let error = error {
+                logError("MeetingCaptureEngine", "Recognition error: \(error.localizedDescription)")
                 DispatchQueue.main.async {
                     guard self.appState?.meetingSubtitleEnabled == true else { return }
-                    logDebug("MeetingCaptureEngine", "Recognition error — restarting")
                     self.startRecognition()
                 }
             }
         }
 
-        restartTimer?.invalidate()
         restartTimer = Timer.scheduledTimer(withTimeInterval: Self.sessionDuration, repeats: false) { [weak self] _ in
             guard self?.appState?.meetingSubtitleEnabled == true else { return }
             logDebug("MeetingCaptureEngine", "Session timeout — restarting")
             self?.startRecognition()
         }
 
-        logInfo("MeetingCaptureEngine", "Recognition started (en-US, on-device)")
+        logInfo("MeetingCaptureEngine", "Recognition started (en-US)")
     }
 
     private func stopRecognition() {
@@ -208,34 +216,45 @@ class MeetingCaptureEngine: NSObject {
 
     // MARK: - Result handling (main thread)
 
-    private func handleRecognitionResult(_ text: String, isFinal: Bool) {
+    private func handleRecognitionResult(_ text: String) {
         guard text != lastPartialText, !text.isEmpty else { return }
         lastPartialText = text
-        sessionLastEnglish = String(text.suffix(Self.maxDisplayChars))
 
-        subtitleOverlay?.updatePartialEnglish(sessionLastEnglish)
-        scheduleTranslation(text, immediate: isFinal)
-    }
+        // Show full session transcript in the live (pending) slot
+        transcriptOverlay?.updateLiveEnglish(text)
 
-    private func scheduleTranslation(_ fullText: String, immediate: Bool) {
         guard appState?.hasPythonBackend == true else { return }
 
         translationTimer?.invalidate()
-        let delay: TimeInterval = immediate ? 0 : Self.translationDebounce
-
-        translationTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
+        translationTimer = Timer.scheduledTimer(withTimeInterval: Self.translationDebounce, repeats: false) { [weak self] _ in
             guard let self = self else { return }
+            // Capture full display text and translation chunk at debounce fire time
+            let displayText = text
+            let chunk = String(text.suffix(Self.maxTranslationChars))
+            guard chunk != self.lastEnglishSentForTranslation else { return }
+            self.lastEnglishSentForTranslation = chunk
+
             self.translationGeneration += 1
             let gen = self.translationGeneration
-            let chunk = String(fullText.suffix(Self.maxTranslationChars))
+            logDebug("MeetingCaptureEngine", "Translating segment (\(chunk.count) chars, gen=\(gen))")
 
             WhisperBridge.shared.translate(text: chunk) { [weak self] result in
                 guard let self = self else { return }
-                if case .success(let chinese) = result, !chinese.isEmpty {
-                    DispatchQueue.main.async {
-                        guard gen == self.translationGeneration else { return }
-                        self.sessionLastChinese = chinese
-                        self.subtitleOverlay?.updateChineseTranslation(chinese)
+                DispatchQueue.main.async {
+                    guard gen == self.translationGeneration else {
+                        logDebug("MeetingCaptureEngine", "Translation gen \(gen) stale, discarding")
+                        return
+                    }
+                    switch result {
+                    case .success(let chinese) where !chinese.isEmpty:
+                        logInfo("MeetingCaptureEngine", "Translation done: '\(chinese.prefix(40))'")
+                        self.transcriptOverlay?.commitEntry(english: displayText, chinese: chinese)
+                        self.lastPartialText = ""  // prevent startRecognition from double-committing
+                        self.startRecognition()
+                    case .success:
+                        logWarn("MeetingCaptureEngine", "Translation returned empty")
+                    case .failure(let error):
+                        logError("MeetingCaptureEngine", "Translation failed: \(error.localizedDescription)")
                     }
                 }
             }
