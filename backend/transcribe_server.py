@@ -59,6 +59,7 @@ _subtitle_prev_text: str = ""
 _subtitle_stable_count: int = 0
 _subtitle_qwen3_model = None
 _subtitle_qwen3_model_path: str | None = None
+_subtitle_committed_prefix: str = ""  # eagerly-translated prefix of current utterance
 _SUBTITLE_STABLE_THRESHOLD = 2       # consecutive identical results → commit utterance
 _SUBTITLE_MAX_SAMPLES = 15 * 16000   # 15s max accumulation before force-commit
 _SUBTITLE_MIN_SAMPLES = 8000         # 0.5s minimum before running ASR
@@ -97,7 +98,21 @@ def _ensure_punc_model() -> bool:
         return False
 
 
+# System prompts Qwen3-ASR may echo back verbatim on silence/noise
+_ASR_SYSTEM_PROMPTS = {
+    "请以简体中文输出语音识别结果，加上适当标点符号，不要使用繁体中文。",
+    "请输出语音识别结果，保持原始语言，不要添加解释。",
+}
+
+
+def _is_silence_hallucination(text: str) -> bool:
+    """Return True if the ASR output is a verbatim echo of a system prompt."""
+    t = text.strip()
+    return any(t == p or t.startswith(p) or p.startswith(t) for p in _ASR_SYSTEM_PROMPTS)
+
+
 def punc_restore(text: str) -> str:
+
     """Add punctuation to raw ASR text using sherpa-onnx CT-Transformer."""
     global _punc_model
     if not text.strip():
@@ -138,6 +153,22 @@ def _load_llm_translator_background():
         sys.stderr.write(f"[TypelessMLX] LLM translator load failed: {e}\n")
         sys.stderr.flush()
 
+
+_SENT_END = re.compile(r'([。！？!?]+|\.(?=\s|$))')
+
+
+def _get_completed_sentences(text: str) -> tuple[list[str], str]:
+    """Split into (complete sentences with end-mark, remaining incomplete tail)."""
+    parts = _SENT_END.split(text)
+    sentences = []
+    i = 0
+    while i + 1 < len(parts):
+        combined = (parts[i].strip() + parts[i + 1]).strip()
+        if combined:
+            sentences.append(combined)
+        i += 2
+    tail = parts[-1].strip() if parts else ""
+    return sentences, tail
 
 def translate_to_chinese_llm(text: str) -> str:
     if not text.strip() or not _llm_translator_ready:
@@ -243,6 +274,8 @@ def transcribe_qwen3(audio_path: str, model_path: str, language: str | None,
     except OSError:
         pass
     text = (result.text if hasattr(result, "text") else str(result)).strip()
+    if _is_silence_hallucination(text):
+        return ""
     return ensure_trailing_punctuation(text)
 
 
@@ -457,12 +490,16 @@ def _transcribe_qwen3_subtitle(audio_path: str, model_path: str) -> str:
         os.remove(tmp_out + ".txt")
     except OSError:
         pass
-    return (result.text if hasattr(result, "text") else str(result)).strip()
+    text = (result.text if hasattr(result, "text") else str(result)).strip()
+    if _is_silence_hallucination(text):
+        return ""
+    return text
 
 
 def handle_subtitle_stream(req_id: str, req: dict):
-    """Accumulate audio chunks, commit utterance when ASR result stabilizes (silence detected)."""
-    global _subtitle_prev_text, _subtitle_stable_count
+    """Accumulate audio chunks; eagerly translate completed sentences in partials,
+    commit remaining tail on VAD-detected silence."""
+    global _subtitle_prev_text, _subtitle_stable_count, _subtitle_committed_prefix
     import numpy as np
     import tempfile
 
@@ -471,6 +508,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
+        _subtitle_committed_prefix = ""
         send({"id": req_id, "text": "", "committed": False})
         return
 
@@ -495,7 +533,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
         send({"id": req_id, "text": "", "committed": False})
         return
 
-    # Write combined buffer, run Qwen3-ASR
+    # Run Qwen3-ASR on full accumulated buffer
     combined = np.concatenate(_subtitle_buffer)
     tmp_wav = os.path.join(tempfile.gettempdir(), f"typelessmlx_sub_{os.getpid()}.wav")
     _subtitle_write_wav(tmp_wav, combined)
@@ -508,8 +546,26 @@ def handle_subtitle_stream(req_id: str, req: dict):
     sys.stderr.write(f"[TypelessMLX] Subtitle ASR ({total_samples/16000:.1f}s buf): {repr(text[:60])}\n")
     sys.stderr.flush()
 
-    force_commit = total_samples >= _SUBTITLE_MAX_SAMPLES
+    # Find new completed sentences not yet eagerly translated
+    if text.startswith(_subtitle_committed_prefix):
+        suffix = text[len(_subtitle_committed_prefix):]
+    else:
+        # ASR corrected earlier text — reset prefix, re-scan from scratch
+        _subtitle_committed_prefix = ""
+        suffix = text
 
+    new_sentences, tail = _get_completed_sentences(punc_restore(suffix) if suffix.strip() else suffix)
+
+    eager_pairs: list[dict] = []
+    for s in new_sentences:
+        zh = translate_to_chinese_llm(s) if _llm_translator_ready else ""
+        eager_pairs.append({"en": s, "zh": zh})
+        _subtitle_committed_prefix += s
+        sys.stderr.write(f"[TypelessMLX] Eager sentence: {repr(s[:50])}\n")
+        sys.stderr.flush()
+
+    # VAD stability check
+    force_commit = total_samples >= _SUBTITLE_MAX_SAMPLES
     if text == _subtitle_prev_text:
         _subtitle_stable_count += 1
         commit = (_subtitle_stable_count >= _SUBTITLE_STABLE_THRESHOLD and bool(text)) or force_commit
@@ -519,17 +575,19 @@ def handle_subtitle_stream(req_id: str, req: dict):
         commit = force_commit
 
     if commit:
-        committed_text = _subtitle_prev_text or text
-        committed_text = punc_restore(committed_text)
-        chinese = translate_to_chinese_llm(committed_text) if _llm_translator_ready else ""
+        # Translate remaining tail (incomplete sentence at end of utterance)
+        tail_punct = punc_restore(tail) if tail.strip() else ""
+        tail_zh = translate_to_chinese_llm(tail_punct) if (tail_punct.strip() and _llm_translator_ready) else ""
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
-        sys.stderr.write(f"[TypelessMLX] Subtitle committed: {repr(committed_text[:60])}\n")
+        _subtitle_committed_prefix = ""
+        sys.stderr.write(f"[TypelessMLX] Subtitle commit: {len(eager_pairs)} eager + tail={repr(tail_punct[:40])}\n")
         sys.stderr.flush()
-        send({"id": req_id, "text": committed_text, "committed": True, "chinese": chinese})
+        send({"id": req_id, "text": tail_punct, "committed": True, "chinese": tail_zh,
+              "eager_sentences": eager_pairs})
     else:
-        send({"id": req_id, "text": text, "committed": False})
+        send({"id": req_id, "text": tail, "committed": False, "eager_sentences": eager_pairs})
 
 
 def main():

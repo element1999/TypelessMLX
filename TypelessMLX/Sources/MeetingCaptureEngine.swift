@@ -192,30 +192,34 @@ class MeetingCaptureEngine: NSObject {
             self.subtitleInFlight = false
             try? FileManager.default.removeItem(at: url)
             switch result {
-            case .success(let (text, committed, chinese)):
-                DispatchQueue.main.async { self.handleSubtitleResult(text: text, committed: committed, chinese: chinese) }
+            case .success(let chunk):
+                DispatchQueue.main.async { self.handleSubtitleChunk(chunk) }
             case .failure(let error):
                 logError("MeetingCaptureEngine", "Subtitle stream error: \(error.localizedDescription)")
             }
         }
     }
 
-    private func handleSubtitleResult(text: String, committed: Bool, chinese: String) {
-        if committed {
-            guard !text.isEmpty else { return }
-            transcriptOverlay?.updateLiveEnglish(text)
-            lastPartialText = text
-            if !chinese.isEmpty {
-                transcriptOverlay?.commitEntry(english: text, chinese: chinese)
-                lastPartialText = ""
-                lastEnglishSentForTranslation = ""
-            } else {
-                triggerTranslation(for: text)
+    private func handleSubtitleChunk(_ chunk: WhisperBridge.SubtitleChunk) {
+        // Commit any eagerly-translated complete sentences first
+        for pair in chunk.eagerSentences {
+            transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
+        }
+        if chunk.committed {
+            // Commit the tail (incomplete sentence at utterance end)
+            if !chunk.text.isEmpty {
+                transcriptOverlay?.commitEntry(english: chunk.text, chinese: chunk.chinese)
             }
+            lastPartialText = ""
+            lastEnglishSentForTranslation = ""
         } else {
-            guard !text.isEmpty, text != lastPartialText else { return }
-            lastPartialText = text
-            transcriptOverlay?.updateLiveEnglish(text)
+            // Update live partial preview
+            if !chunk.text.isEmpty, chunk.text != lastPartialText {
+                lastPartialText = chunk.text
+                transcriptOverlay?.updateLiveEnglish(chunk.text)
+            } else if chunk.text.isEmpty && !chunk.eagerSentences.isEmpty {
+                transcriptOverlay?.clearPending()
+            }
         }
     }
 
