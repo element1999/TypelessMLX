@@ -44,7 +44,6 @@ models/
 
 # Claude-internal plan files (not part of the project)
 .claude/
-CLAUDE.md
 OPTIMIZATIONS.md
 upgrade.md
 參考.jpeg
