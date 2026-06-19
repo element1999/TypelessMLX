@@ -154,17 +154,7 @@ def _load_llm_translator_background():
         sys.stderr.flush()
 
 
-_SENT_END = re.compile(r'([。！？!?]+|\.(?=\s))')
-
-
-def _clean_mixed_punc(text: str) -> str:
-    """Remove duplicate English+Chinese punctuation that CT-Punc adds after existing marks."""
-    text = re.sub(r',，', '，', text)
-    text = re.sub(r'\.。', '。', text)
-    text = re.sub(r'\.，', '。', text)
-    text = re.sub(r'，，+', '，', text)
-    text = re.sub(r'。。+', '。', text)
-    return text
+_SENT_END = re.compile(r'([。！？!?]+|\.(?=\s|$))')
 
 
 def _get_completed_sentences(text: str) -> tuple[list[str], str]:
@@ -556,8 +546,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
     sys.stderr.write(f"[TypelessMLX] Subtitle ASR ({total_samples/16000:.1f}s buf): {repr(text[:60])}\n")
     sys.stderr.flush()
 
-    # Find new completed sentences using RAW ASR text (no CT-Punc on partial —
-    # CT-Punc adds 。 after English . making incomplete sentences look "complete")
+    # Find new completed sentences not yet eagerly translated
     if text.startswith(_subtitle_committed_prefix):
         suffix = text[len(_subtitle_committed_prefix):]
     else:
@@ -565,27 +554,15 @@ def handle_subtitle_stream(req_id: str, req: dict):
         _subtitle_committed_prefix = ""
         suffix = text
 
-    new_sentences_raw, tail = _get_completed_sentences(suffix)
+    new_sentences, tail = _get_completed_sentences(punc_restore(suffix) if suffix.strip() else suffix)
 
     eager_pairs: list[dict] = []
-    for s in new_sentences_raw:
-        # Apply CT-Punc + mixed-punc cleanup only to confirmed complete sentences
-        s_clean = _clean_mixed_punc(punc_restore(s))
-        zh = translate_to_chinese_llm(s_clean) if _llm_translator_ready else ""
-        eager_pairs.append({"en": s_clean, "zh": zh})
-        _subtitle_committed_prefix += s  # track with raw text for prefix matching
-        sys.stderr.write(f"[TypelessMLX] Eager sentence: {repr(s_clean[:50])}\n")
+    for s in new_sentences:
+        zh = translate_to_chinese_llm(s) if _llm_translator_ready else ""
+        eager_pairs.append({"en": s, "zh": zh})
+        _subtitle_committed_prefix += s
+        sys.stderr.write(f"[TypelessMLX] Eager sentence: {repr(s[:50])}\n")
         sys.stderr.flush()
-
-    # Trim audio buffer proportional to committed text so next ASR won't repeat old sentences
-    if new_sentences_raw and text:
-        keep_frac = len(tail) / len(text) if len(text) > 0 else 0.0
-        min_keep = int(2.0 * 16000)  # always keep at least 2s for VAD context
-        total_samp = sum(len(a) for a in _subtitle_buffer)
-        target = max(int(total_samp * keep_frac), min_keep)
-        while sum(len(a) for a in _subtitle_buffer) > target and len(_subtitle_buffer) > 1:
-            _subtitle_buffer.pop(0)
-        _subtitle_committed_prefix = ""  # fresh start — old audio is gone
 
     # VAD stability check
     force_commit = total_samples >= _SUBTITLE_MAX_SAMPLES
@@ -599,7 +576,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
 
     if commit:
         # Translate remaining tail (incomplete sentence at end of utterance)
-        tail_punct = _clean_mixed_punc(punc_restore(tail)) if tail.strip() else ""
+        tail_punct = punc_restore(tail) if tail.strip() else ""
         tail_zh = translate_to_chinese_llm(tail_punct) if (tail_punct.strip() and _llm_translator_ready) else ""
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""

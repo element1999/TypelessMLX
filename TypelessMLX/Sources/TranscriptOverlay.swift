@@ -29,26 +29,6 @@ class TranscriptOverlay {
         }
     }
 
-    /// Overwrite the pending slot with EN+ZH without advancing pendingLocation.
-    /// Used for eager per-sentence translation that may still grow.
-    func updatePendingEntry(english: String, chinese: String) {
-        guard !english.isEmpty else { return }
-        DispatchQueue.main.async {
-            if self.window == nil { self.createWindow() }
-            guard let storage = self.textView?.textStorage else { return }
-            let chunk = NSMutableAttributedString()
-            chunk.append(self.attr(english + "\n", color: NSColor(white: 0.88, alpha: 1), size: 14))
-            if !chinese.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                chunk.append(self.attr(chinese + "\n", color: NSColor(white: 0.55, alpha: 1), size: 13))
-            }
-            let pendingLen = storage.length - self.pendingLocation
-            storage.replaceCharacters(in: NSRange(location: self.pendingLocation, length: pendingLen),
-                                      with: chunk)
-            self.textView?.scrollToEndOfDocument(nil)
-            self.window?.orderFrontRegardless()
-        }
-    }
-
     /// Finalize the current live entry with Chinese translation, then advance the pending marker.
     func commitEntry(english: String, chinese: String) {
         guard !english.isEmpty else { return }
@@ -83,13 +63,6 @@ class TranscriptOverlay {
     func appendEntry(english: String, chinese: String, newParagraph: Bool) {
         guard !english.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         DispatchQueue.main.async { self._append(english: english, chinese: chinese, newParagraph: newParagraph) }
-    }
-
-    /// Commit whatever is currently in the pending slot (advance pendingLocation to end).
-    func advancePending() {
-        DispatchQueue.main.async {
-            self.pendingLocation = self.textView?.textStorage?.length ?? self.pendingLocation
-        }
     }
 
     func clear() {
