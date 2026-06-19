@@ -270,6 +270,7 @@ def lookup_word_llm(text: str) -> str:
 
 
 def transcribe_qwen3(audio_path: str, model_path: str, language: str | None,
+                     initial_prompt: str | None = None,
                      remove_fillers: bool = False) -> str:
     global _qwen3_model, _qwen3_model_path
     from mlx_audio.stt.utils import load_model
@@ -282,6 +283,8 @@ def transcribe_qwen3(audio_path: str, model_path: str, language: str | None,
     import tempfile
     tmp_path = os.path.join(tempfile.gettempdir(), f"typelessmlx_qwen3_{os.getpid()}")
     system = "请以简体中文输出语音识别结果，加上适当标点符号，不要使用繁体中文。"
+    if initial_prompt and initial_prompt.strip():
+        system += f"识别时优先考虑以下术语和上下文：{initial_prompt[:600]}。"
     if remove_fillers:
         system += "移除说话者的语音犹豫音（例如「呃」「嗯」「啊」），但保留所有有意义的词汇。"
     result = generate_transcription(
@@ -305,7 +308,7 @@ def transcribe(audio_path: str, model_path: str, language: str | None,
                initial_prompt: str | None = None, model_type: str = "whisper",
                remove_fillers: bool = False) -> str:
     if model_type == "qwen3":
-        return transcribe_qwen3(audio_path, model_path, language, remove_fillers)
+        return transcribe_qwen3(audio_path, model_path, language, initial_prompt, remove_fillers)
     import mlx_whisper
     use_fp16 = model_type == "whisper" and running_on_apple_silicon()
     if use_fp16:
@@ -489,7 +492,8 @@ def _subtitle_write_wav(path: str, data, sample_rate: int = 16000):
         f.writeframes(pcm.tobytes())
 
 
-def _transcribe_qwen3_subtitle(audio_path: str, model_path: str) -> str:
+def _transcribe_qwen3_subtitle(audio_path: str, model_path: str,
+                               initial_prompt: str | None = None) -> str:
     """Run Qwen3-ASR on audio; returns transcript in original language (VAD built-in)."""
     global _subtitle_qwen3_model, _subtitle_qwen3_model_path
     from mlx_audio.stt.utils import load_model
@@ -501,12 +505,16 @@ def _transcribe_qwen3_subtitle(audio_path: str, model_path: str) -> str:
         _subtitle_qwen3_model_path = model_path
     import tempfile
     tmp_out = os.path.join(tempfile.gettempdir(), f"typelessmlx_subout_{os.getpid()}")
+    subtitle_prompt = "请输出语音识别结果，保持原始语言，不要添加解释。"
+    if initial_prompt and initial_prompt.strip():
+        subtitle_prompt += f"优先正确识别以下术语和上下文：{initial_prompt[:600]}。"
+
     result = generate_transcription(
         model=_subtitle_qwen3_model,
         audio=audio_path,
         output_path=tmp_out,
         format="txt",
-        system_prompt="请输出语音识别结果，保持原始语言，不要添加解释。",
+        system_prompt=subtitle_prompt,
     )
     try:
         os.remove(tmp_out + ".txt")
@@ -538,6 +546,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
 
     audio_path = req.get("audio_path", "")
     model_path = req.get("model_path", "mlx-community/Qwen3-ASR-0.6B-8bit")
+    initial_prompt = req.get("initial_prompt")
 
     if not audio_path or not os.path.exists(audio_path):
         send({"id": req_id, "text": "", "committed": False,
@@ -561,7 +570,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
     combined = np.concatenate(_subtitle_buffer)
     tmp_wav = os.path.join(tempfile.gettempdir(), f"typelessmlx_sub_{os.getpid()}.wav")
     _subtitle_write_wav(tmp_wav, combined)
-    text = _transcribe_qwen3_subtitle(tmp_wav, model_path)
+    text = _transcribe_qwen3_subtitle(tmp_wav, model_path, initial_prompt)
     try:
         os.remove(tmp_wav)
     except OSError:

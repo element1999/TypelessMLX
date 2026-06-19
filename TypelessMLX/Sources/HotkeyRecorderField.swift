@@ -15,6 +15,7 @@ struct HotkeyRecorderField: NSViewRepresentable {
         let v = HotkeyRecorderNSView()
         v.keyCode = keyCode
         v.modifiers = modifiers
+        v.refreshLabel()
         v.onChange = { kc, mods in
             keyCode = kc
             modifiers = mods
@@ -38,6 +39,7 @@ class HotkeyRecorderNSView: NSView {
     var onChange: ((Int, Int) -> Void)?
 
     private let label = NSTextField(labelWithString: "")
+    private var armRecordingOnFocus = false
 
     override var acceptsFirstResponder: Bool { true }
 
@@ -87,18 +89,27 @@ class HotkeyRecorderNSView: NSView {
     }
 
     override func mouseDown(with event: NSEvent) {
+        armRecordingOnFocus = true
         window?.makeFirstResponder(self)
     }
 
     override func becomeFirstResponder() -> Bool {
         guard super.becomeFirstResponder() else { return false }
-        isRecording = true
+        // Only start recording when the field is explicitly clicked.
+        // macOS may auto-focus the first key view when the window opens.
+        if armRecordingOnFocus {
+            isRecording = true
+            armRecordingOnFocus = false
+        } else {
+            isRecording = false
+        }
         refreshLabel()
         return true
     }
 
     override func resignFirstResponder() -> Bool {
         guard super.resignFirstResponder() else { return false }
+        armRecordingOnFocus = false
         isRecording = false
         refreshLabel()
         return true

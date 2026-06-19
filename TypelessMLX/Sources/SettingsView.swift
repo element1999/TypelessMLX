@@ -379,7 +379,16 @@ struct ModelSettingsTab: View {
                     .onChange(of: dictionaryTerms) { newValue in
                         DictionaryService.shared.rawTerms = newValue
                     }
-            }
+            
+                HStack {
+                    Spacer()
+                    Button("恢复默认词典") {
+                        DictionaryService.shared.resetToDefaultTerms()
+                        dictionaryTerms = DictionaryService.shared.rawTerms
+                    }
+                    .controlSize(.small)
+                }
+}
 
             Section {
                 Button("打开设置与安装窗口") {

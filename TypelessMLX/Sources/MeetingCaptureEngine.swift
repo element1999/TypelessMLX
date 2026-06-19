@@ -154,7 +154,8 @@ class MeetingCaptureEngine: NSObject {
         translationGeneration += 1
 
         if appState?.hasPythonBackend == true {
-            WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: subtitleModelPath, reset: true) { _ in }
+            let prompt = DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)
+            WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: subtitleModelPath, initialPrompt: prompt, reset: true) { _ in }
         }
 
         chunkTimer = Timer.scheduledTimer(withTimeInterval: Self.chunkInterval, repeats: true) { [weak self] _ in
@@ -186,7 +187,7 @@ class MeetingCaptureEngine: NSObject {
         guard writeWAV(samples: chunk, to: url) else { return }
 
         subtitleInFlight = true
-        WhisperBridge.shared.streamSubtitle(audioURL: url, modelPath: subtitleModelPath) { [weak self] result in
+        WhisperBridge.shared.streamSubtitle(audioURL: url, modelPath: subtitleModelPath, initialPrompt: DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)) { [weak self] result in
             guard let self = self else { return }
             self.subtitleInFlight = false
             try? FileManager.default.removeItem(at: url)

@@ -13,12 +13,8 @@ class ModelManager: ObservableObject {
     private let queue = DispatchQueue(label: "com.typelessmlx.modelmanager", qos: .utility)
 
     private init() {
-        // Compute initial sizes synchronously so the UI shows correct state immediately.
-        var sizes: [String: Int64] = [:]
-        for model in AppState.availableModels {
-            sizes[model.id] = diskSize(for: model)
-        }
-        cachedSizes = sizes
+        // Warm cache sizes asynchronously to avoid blocking first-time Settings open.
+        refreshAllStatuses()
     }
 
     // MARK: - Cache Status
@@ -152,6 +148,9 @@ sys.stdout.flush()
     /// Returns the root cache directory for the model (nil if not applicable).
     private func cacheDirectory(for model: MLXModel) -> URL? {
         if model.isLocal {
+            if model.repoOrPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return nil
+            }
             return URL(fileURLWithPath: model.repoOrPath)
         }
         // HuggingFace Hub format: models--org--repo

@@ -414,7 +414,7 @@ class WhisperBridge {
         let utteranceSentences: [(en: String, zh: String)] // all eager for utterance (on commit only)
     }
 
-    func streamSubtitle(audioURL: URL?, modelPath: String, reset: Bool = false,
+    func streamSubtitle(audioURL: URL?, modelPath: String, initialPrompt: String? = nil, reset: Bool = false,
                         completion: @escaping (Result<SubtitleChunk, Error>) -> Void) {
         lock.lock()
         guard isReady else {
@@ -429,6 +429,7 @@ class WhisperBridge {
         resetIdleTimer()
 
         var request: [String: Any] = ["action": "subtitle_stream", "model_path": modelPath]
+        if let prompt = initialPrompt, !prompt.isEmpty { request["initial_prompt"] = prompt }
         if reset {
             request["reset"] = true
         } else if let url = audioURL {

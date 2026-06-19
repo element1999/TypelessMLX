@@ -146,16 +146,37 @@ class AppState: ObservableObject {
         }
         return "mlx-community/whisper-large-v3-mlx"
     }
-
-    /// Text model for lookup / translation — scales with selected ASR model.
+    /// Text model for lookup / translation.
     var resolvedTextModelPath: String {
-        switch selectedModelID {
-        case "qwen3-asr-1.7b": return "mlx-community/Qwen3-1.7B-4bit"
-        default:               return "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        return "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+    }
+
+    private func normalizeHotkeyDefaults() {
+        let defaultModifiers = 6144  // controlKey | optionKey
+
+        func isInvalidHotkey(_ keyCode: Int, _ modifiers: Int) -> Bool {
+            if modifiers == 0 { return true }
+            if keyCode <= 0 { return true }
+            if HotkeyRecorderNSView.isModifierKey(keyCode) { return true }
+            return HotkeyRecorderNSView.keyChar[keyCode] == nil
+        }
+
+        if isInvalidHotkey(lookupHotkeyKeyCode, lookupHotkeyModifiers) {
+            lookupHotkeyKeyCode = 2    // D
+            lookupHotkeyModifiers = defaultModifiers
+        }
+        if isInvalidHotkey(translateHotkeyKeyCode, translateHotkeyModifiers) {
+            translateHotkeyKeyCode = 17  // T
+            translateHotkeyModifiers = defaultModifiers
+        }
+        if isInvalidHotkey(ocrHotkeyKeyCode, ocrHotkeyModifiers) {
+            ocrHotkeyKeyCode = 31  // O
+            ocrHotkeyModifiers = defaultModifiers
         }
     }
 
     private init() {
+        normalizeHotkeyDefaults()
         loadHistory()
         logInfo("AppState", "Initialized. Model=\(selectedModelID), Language=\(language), Mode=\(hotkeyMode)")
     }
