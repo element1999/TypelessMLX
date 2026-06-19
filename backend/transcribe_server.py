@@ -53,6 +53,16 @@ _llm_translator_model = None
 _llm_translator_tokenizer = None
 _llm_translator_ready = False
 
+# Subtitle stream session state (module-level, server is single-threaded)
+_subtitle_buffer: list = []          # list of np.ndarray float32 at 16kHz
+_subtitle_prev_text: str = ""
+_subtitle_stable_count: int = 0
+_subtitle_qwen3_model = None
+_subtitle_qwen3_model_path: str | None = None
+_SUBTITLE_STABLE_THRESHOLD = 3       # consecutive identical results → commit utterance
+_SUBTITLE_MAX_SAMPLES = 15 * 16000   # 15s max accumulation before force-commit
+_SUBTITLE_MIN_SAMPLES = 8000         # 0.5s minimum before running ASR
+
 
 def _load_llm_translator_background():
     global _llm_translator_model, _llm_translator_tokenizer, _llm_translator_ready
@@ -332,6 +342,134 @@ def translate_to_english_llm(text: str) -> str:
         return ""
 
 
+def _subtitle_read_wav(path: str):
+    """Read WAV file as float32 mono normalized to [-1, 1]."""
+    import numpy as np
+    import wave
+    with wave.open(path, 'rb') as f:
+        n_channels = f.getnchannels()
+        sampwidth = f.getsampwidth()
+        n_frames = f.getnframes()
+        raw = f.readframes(n_frames)
+    if sampwidth == 2:
+        data = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+    elif sampwidth == 4:
+        data = np.frombuffer(raw, dtype=np.int32).astype(np.float32) / 2147483648.0
+    else:
+        data = np.frombuffer(raw, dtype=np.float32)
+    if n_channels > 1:
+        data = data.reshape(-1, n_channels).mean(axis=1)
+    return data
+
+
+def _subtitle_write_wav(path: str, data, sample_rate: int = 16000):
+    """Write float32 array as 16-bit mono WAV."""
+    import numpy as np
+    import wave
+    pcm = np.clip(data * 32767, -32768, 32767).astype(np.int16)
+    with wave.open(path, 'wb') as f:
+        f.setnchannels(1)
+        f.setsampwidth(2)
+        f.setframerate(sample_rate)
+        f.writeframes(pcm.tobytes())
+
+
+def _transcribe_qwen3_subtitle(audio_path: str, model_path: str) -> str:
+    """Run Qwen3-ASR on audio; returns transcript in original language (VAD built-in)."""
+    global _subtitle_qwen3_model, _subtitle_qwen3_model_path
+    from mlx_audio.stt.utils import load_model
+    from mlx_audio.stt.generate import generate_transcription
+    if _subtitle_qwen3_model is None or _subtitle_qwen3_model_path != model_path:
+        sys.stderr.write(f"[TypelessMLX] Loading subtitle ASR: {model_path}\n")
+        sys.stderr.flush()
+        _subtitle_qwen3_model = load_model(model_path)
+        _subtitle_qwen3_model_path = model_path
+    import tempfile
+    tmp_out = os.path.join(tempfile.gettempdir(), f"typelessmlx_subout_{os.getpid()}")
+    result = generate_transcription(
+        model=_subtitle_qwen3_model,
+        audio=audio_path,
+        output_path=tmp_out,
+        format="txt",
+        system_prompt="请输出语音识别结果，保持原始语言，不要添加解释。",
+    )
+    try:
+        os.remove(tmp_out + ".txt")
+    except OSError:
+        pass
+    return (result.text if hasattr(result, "text") else str(result)).strip()
+
+
+def handle_subtitle_stream(req_id: str, req: dict):
+    """Accumulate audio chunks, commit utterance when ASR result stabilizes (silence detected)."""
+    global _subtitle_prev_text, _subtitle_stable_count
+    import numpy as np
+    import tempfile
+
+    reset = req.get("reset", False)
+    if reset:
+        _subtitle_buffer.clear()
+        _subtitle_prev_text = ""
+        _subtitle_stable_count = 0
+        send({"id": req_id, "text": "", "committed": False})
+        return
+
+    audio_path = req.get("audio_path", "")
+    model_path = req.get("model_path", "mlx-community/Qwen3-ASR-0.6B-8bit")
+
+    if not audio_path or not os.path.exists(audio_path):
+        send({"id": req_id, "text": "", "committed": False,
+              "error": f"Audio not found: {audio_path}"})
+        return
+
+    chunk = _subtitle_read_wav(audio_path)
+    _subtitle_buffer.append(chunk)
+
+    # Trim to max 15s
+    total_samples = sum(len(a) for a in _subtitle_buffer)
+    while total_samples > _SUBTITLE_MAX_SAMPLES and len(_subtitle_buffer) > 1:
+        total_samples -= len(_subtitle_buffer[0])
+        _subtitle_buffer.pop(0)
+
+    if total_samples < _SUBTITLE_MIN_SAMPLES:
+        send({"id": req_id, "text": "", "committed": False})
+        return
+
+    # Write combined buffer, run Qwen3-ASR
+    combined = np.concatenate(_subtitle_buffer)
+    tmp_wav = os.path.join(tempfile.gettempdir(), f"typelessmlx_sub_{os.getpid()}.wav")
+    _subtitle_write_wav(tmp_wav, combined)
+    text = _transcribe_qwen3_subtitle(tmp_wav, model_path)
+    try:
+        os.remove(tmp_wav)
+    except OSError:
+        pass
+
+    sys.stderr.write(f"[TypelessMLX] Subtitle ASR ({total_samples/16000:.1f}s buf): {repr(text[:60])}\n")
+    sys.stderr.flush()
+
+    force_commit = total_samples >= _SUBTITLE_MAX_SAMPLES
+
+    if text == _subtitle_prev_text:
+        _subtitle_stable_count += 1
+        commit = (_subtitle_stable_count >= _SUBTITLE_STABLE_THRESHOLD and bool(text)) or force_commit
+    else:
+        _subtitle_stable_count = 0
+        _subtitle_prev_text = text
+        commit = force_commit
+
+    if commit:
+        committed_text = _subtitle_prev_text or text
+        _subtitle_buffer.clear()
+        _subtitle_prev_text = ""
+        _subtitle_stable_count = 0
+        sys.stderr.write(f"[TypelessMLX] Subtitle committed: {repr(committed_text[:60])}\n")
+        sys.stderr.flush()
+        send({"id": req_id, "text": committed_text, "committed": True})
+    else:
+        send({"id": req_id, "text": text, "committed": False})
+
+
 def main():
     import threading
     import mlx_whisper  # pre-load before background threads start to avoid import-lock races
@@ -444,6 +582,9 @@ def main():
                     continue
                 entry = lookup_word_llm(text)
                 send({"id": req_id, "text": entry, "error": None})
+
+            elif action == "subtitle_stream":
+                handle_subtitle_stream(req_id, req)
 
             else:
                 send({"id": req_id, "error": f"Unknown action: {action}"})

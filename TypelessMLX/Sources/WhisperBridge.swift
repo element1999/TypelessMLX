@@ -286,6 +286,15 @@ class WhisperBridge {
         let elapsed = Date().timeIntervalSince(context.startTime)
         logInfo("WhisperBridge", "\(context.label) latency: \(String(format: "%.2f", elapsed))s")
 
+        // SubtitleStream response: has "committed" field → encode text\u{0001}0/1
+        if json.keys.contains("committed") {
+            let text = json["text"] as? String ?? ""
+            let committed = json["committed"] as? Bool ?? false
+            let encoded = "\(text)\u{0001}\(committed ? "1" : "0")"
+            DispatchQueue.main.async { context.completion(.success(encoded)) }
+            return
+        }
+
         // Subtitle response: encode english\u{0001}chinese for caller to unpack
         if let _ = json["translated"] {
             let english = json["text"] as? String ?? ""
@@ -392,6 +401,45 @@ class WhisperBridge {
 
         let request: [String: Any] = ["action": "translate", "text": text]
         queueRequest(payload: request, timeout: 30.0, label: "Translate", completion: completion)
+    }
+
+    func streamSubtitle(audioURL: URL?, modelPath: String, reset: Bool = false,
+                        completion: @escaping (Result<(text: String, committed: Bool), Error>) -> Void) {
+        lock.lock()
+        guard isReady else {
+            lock.unlock()
+            let err = NSError(domain: "WhisperBridge", code: -3,
+                              userInfo: [NSLocalizedDescriptionKey: "Python backend not ready"])
+            completion(.failure(err))
+            return
+        }
+        lock.unlock()
+
+        resetIdleTimer()
+
+        var request: [String: Any] = ["action": "subtitle_stream", "model_path": modelPath]
+        if reset {
+            request["reset"] = true
+        } else if let url = audioURL {
+            request["audio_path"] = url.path
+        } else {
+            return
+        }
+
+        let wrapped: (Result<String, Error>) -> Void = { result in
+            switch result {
+            case .success(let encoded):
+                let parts = encoded.components(separatedBy: "\u{0001}")
+                if parts.count == 2 {
+                    completion(.success((text: parts[0], committed: parts[1] == "1")))
+                } else {
+                    completion(.success((text: encoded, committed: false)))
+                }
+            case .failure(let error):
+                completion(.failure(error))
+            }
+        }
+        queueRequest(payload: request, timeout: 30.0, label: "SubtitleStream", completion: wrapped)
     }
 
     func transcribe(audioURL: URL, model: String?, language: String?,
