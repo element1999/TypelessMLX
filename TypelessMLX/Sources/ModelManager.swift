@@ -13,7 +13,12 @@ class ModelManager: ObservableObject {
     private let queue = DispatchQueue(label: "com.typelessmlx.modelmanager", qos: .utility)
 
     private init() {
-        refreshAllStatuses()
+        // Compute initial sizes synchronously so the UI shows correct state immediately.
+        var sizes: [String: Int64] = [:]
+        for model in AppState.availableModels {
+            sizes[model.id] = diskSize(for: model)
+        }
+        cachedSizes = sizes
     }
 
     // MARK: - Cache Status
