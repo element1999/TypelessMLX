@@ -48,6 +48,7 @@ class MeetingCaptureEngine: NSObject {
     func stop() {
         stopAll()
         transcriptOverlay?.hide()
+        SubtitleBar.shared.hide()
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -201,24 +202,34 @@ class MeetingCaptureEngine: NSObject {
     }
 
     private func handleSubtitleChunk(_ chunk: WhisperBridge.SubtitleChunk) {
-        // Commit any eagerly-translated complete sentences first
-        for pair in chunk.eagerSentences {
-            transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
-        }
         if chunk.committed {
-            // Commit the tail (incomplete sentence at utterance end)
+            // Commit all eager sentences to transcript
+            for pair in chunk.eagerSentences {
+                transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
+            }
+            // Commit tail to transcript (if non-empty)
             if !chunk.text.isEmpty {
                 transcriptOverlay?.commitEntry(english: chunk.text, chinese: chunk.chinese)
+            }
+            // Subtitle bar: show tail, or fall back to last eager sentence
+            if !chunk.text.isEmpty {
+                SubtitleBar.shared.commitSentence(english: chunk.text, chinese: chunk.chinese)
+            } else if let last = chunk.eagerSentences.last {
+                SubtitleBar.shared.commitSentence(english: last.en, chinese: last.zh)
             }
             lastPartialText = ""
             lastEnglishSentForTranslation = ""
         } else {
-            // Update live partial preview
-            if !chunk.text.isEmpty, chunk.text != lastPartialText {
+            // Eager sentences: update subtitle bar + add to transcript
+            for pair in chunk.eagerSentences {
+                transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
+            }
+            if let latest = chunk.eagerSentences.last {
+                SubtitleBar.shared.commitSentence(english: latest.en, chinese: latest.zh)
+                lastPartialText = latest.en
+            } else if !chunk.text.isEmpty, chunk.text != lastPartialText {
+                SubtitleBar.shared.updateLive(chunk.text)
                 lastPartialText = chunk.text
-                transcriptOverlay?.updateLiveEnglish(chunk.text)
-            } else if chunk.text.isEmpty && !chunk.eagerSentences.isEmpty {
-                transcriptOverlay?.clearPending()
             }
         }
     }
