@@ -8,7 +8,8 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 ENTITLEMENTS="$PROJECT_DIR/TypelessMLX/TypelessMLX.entitlements"
 INSTALL_DIR="/Applications/$APP_NAME.app"
 APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/TypelessMLX/Info.plist" 2>/dev/null || echo "0.0.0")
-DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
+VENV_BUNDLED=0   # set to 1 after venv is successfully copied
+DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"  # recalculated after venv step
 
 INSTALL_APP=0
 MODE="dev"        # dev | release
@@ -126,6 +127,7 @@ if [ "$MODE" = "release" ]; then
     if [ -d "$VENV_SRC" ]; then
         echo "  📦 Bundling Python venv (resolving symlinks — this takes a while)..."
         cp -RL "$VENV_SRC" "$APP_BUNDLE/Contents/Resources/venv"
+        VENV_BUNDLED=1
         echo "  ✅ Venv bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/venv" | awk '{print $1}'))"
     else
         echo "  ⚠️  No venv at $VENV_SRC — skipping venv bundle"
@@ -154,9 +156,21 @@ codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|
 
 # ── Step 4: DMG + model archives (release only) ───────────────────────────────
 if [ "$MODE" = "release" ]; then
+    # Recalculate DMG name now that we know whether venv was bundled
+    if [ "$VENV_BUNDLED" = "1" ]; then
+        DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}-full.dmg"
+    else
+        DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
+    fi
     echo ""
     echo "💿 Creating DMG..."
-    hdiutil create -volname "$APP_NAME" -srcfolder "$APP_BUNDLE" -ov -format UDZO "$DMG_PATH" 2>&1
+    DMG_STAGING="$BUILD_DIR/dmg-staging"
+    rm -rf "$DMG_STAGING"
+    mkdir -p "$DMG_STAGING"
+    cp -R "$APP_BUNDLE" "$DMG_STAGING/"
+    ln -s /Applications "$DMG_STAGING/Applications"
+    hdiutil create -volname "$APP_NAME $APP_VERSION" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" 2>&1
+    rm -rf "$DMG_STAGING"
     DMG_SIZE=$(du -sh "$DMG_PATH" | awk '{print $1}')
     echo "  ✅ DMG: $DMG_PATH ($DMG_SIZE)"
 
