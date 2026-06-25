@@ -128,7 +128,7 @@ if [ "$MODE" = "release" ]; then
     echo "  🦀 Building asr-server (Rust + MLX)..."
     ASR_RS_DIR="$PROJECT_DIR/vendor/qwen3_asr_rs"
     if [ -d "$ASR_RS_DIR" ]; then
-        (cd "$ASR_RS_DIR" && source "$HOME/.cargo/env" && cargo build --release --features mlx 2>&1 | tail -3)
+        (cd "$ASR_RS_DIR" && source "$HOME/.cargo/env" && cargo build --release --no-default-features --features mlx 2>&1 | tail -3)
         mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
         cp "$ASR_RS_DIR/target/release/asr-server" "$APP_BUNDLE/Contents/Resources/bin/"
         chmod +x "$APP_BUNDLE/Contents/Resources/bin/asr-server"

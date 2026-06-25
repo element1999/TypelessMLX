@@ -76,26 +76,44 @@ actor LLMService {
     // MARK: - Model Loading
 
     private func loadModelIfNeeded() async throws -> ModelContainer {
-        let modelPath = AppState.shared.resolvedTextModelPath
+        let modelPath = await MainActor.run { AppState.shared.resolvedTextModelPath }
 
         if let c = container, loadedModelPath == modelPath {
             return c
         }
 
-        // Release previous model before loading new one
         container = nil
         loadedModelPath = nil
 
         logInfo("LLMService", "Loading text model: \(modelPath)")
 
-        let configuration = ModelConfiguration(id: modelPath)
-        let newContainer = try await LLMModelFactory.shared.loadContainer(
-            configuration: configuration)
+        // Resolve HF repo ID to local snapshot path to avoid network access
+        let localPath = resolveLocalSnapshotPath(for: modelPath)
+        let configuration: ModelConfiguration
+        if localPath != modelPath {
+            logInfo("LLMService", "Using local snapshot: \(localPath)")
+            configuration = ModelConfiguration(directory: URL(fileURLWithPath: localPath))
+        } else {
+            configuration = ModelConfiguration(id: modelPath)
+        }
 
+        let newContainer = try await LLMModelFactory.shared.loadContainer(configuration: configuration)
         container = newContainer
         loadedModelPath = modelPath
         logInfo("LLMService", "Text model loaded: \(modelPath)")
         return newContainer
+    }
+
+    /// Resolve a HuggingFace repo ID to the latest local snapshot path.
+    /// Returns the original string if no local snapshot is found.
+    private func resolveLocalSnapshotPath(for repoID: String) -> String {
+        guard !repoID.hasPrefix("/") else { return repoID }
+        let sanitized = repoID.replacingOccurrences(of: "/", with: "--")
+        let cacheBase = (NSHomeDirectory() as NSString)
+            .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)/snapshots")
+        let snapshots = (try? FileManager.default.contentsOfDirectory(atPath: cacheBase)) ?? []
+        guard let latest = snapshots.sorted().last else { return repoID }
+        return (cacheBase as NSString).appendingPathComponent(latest)
     }
 
     // MARK: - Generation
