@@ -127,6 +127,16 @@ if [ "$MODE" = "release" ]; then
     if [ -d "$VENV_SRC" ]; then
         echo "  📦 Bundling Python venv (resolving symlinks — this takes a while)..."
         cp -RL "$VENV_SRC" "$APP_BUNDLE/Contents/Resources/venv"
+        # Bundle libpython3.12.dylib — the Python binary links to it via @rpath/../lib
+        # but it lives in the uv-managed Python installation, not in the venv itself.
+        LIBPYTHON=$(find "$HOME/.local/share/uv" "$HOME/.pyenv" /opt/homebrew \
+                         -name "libpython3.12.dylib" 2>/dev/null | head -1)
+        if [ -n "$LIBPYTHON" ]; then
+            cp "$LIBPYTHON" "$APP_BUNDLE/Contents/Resources/venv/lib/"
+            echo "  ✅ libpython3.12.dylib bundled"
+        else
+            echo "  ⚠️  libpython3.12.dylib not found — venv may fail on other machines"
+        fi
         VENV_BUNDLED=1
         echo "  ✅ Venv bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/venv" | awk '{print $1}'))"
     else
