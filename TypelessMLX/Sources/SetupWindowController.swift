@@ -138,15 +138,45 @@ class SetupViewModel: ObservableObject {
         let destParent = (dest as NSString).deletingLastPathComponent
         do {
             try fm.createDirectory(atPath: destParent, withIntermediateDirectories: true)
-            if fm.fileExists(atPath: dest) {
-                try fm.removeItem(atPath: dest)
-            }
-            try fm.copyItem(atPath: bundledVenvPath, toPath: dest)
-            return WhisperBridge.isVenvReady()
         } catch {
-            appendLog("   复制失败: \(error.localizedDescription)")
+            appendLog("   ❌ 无法创建目录: \(error.localizedDescription)")
             return false
         }
+        // Remove existing venv — try FileManager first, fall back to rm -rf
+        if fm.fileExists(atPath: dest) {
+            appendLog("   检测到旧虚拟环境，正在删除...")
+            var removed = false
+            do {
+                try fm.removeItem(atPath: dest)
+                removed = true
+            } catch {
+                appendLog("   ⚠️  FileManager 删除失败，尝试 rm -rf...")
+                let rm = Process()
+                rm.executableURL = URL(fileURLWithPath: "/bin/rm")
+                rm.arguments = ["-rf", dest]
+                try? rm.run()
+                rm.waitUntilExit()
+                removed = rm.terminationStatus == 0
+            }
+            if !removed {
+                appendLog("   ❌ 无法删除旧虚拟环境，请手动删除: \(dest)")
+                return false
+            }
+        }
+        // Copy bundled venv
+        appendLog("   正在复制虚拟环境...")
+        do {
+            try fm.copyItem(atPath: bundledVenvPath, toPath: dest)
+        } catch {
+            appendLog("   ❌ 复制失败: \(error.localizedDescription)")
+            return false
+        }
+        // Verify
+        if !WhisperBridge.isVenvReady() {
+            appendLog("   ❌ Python 环境验证失败（包导入错误），请重试或联系开发者")
+            return false
+        }
+        return true
     }
 
     private func createVenv() -> Bool {
