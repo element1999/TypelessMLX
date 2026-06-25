@@ -15,10 +15,11 @@ INSTALL_APP=0
 MODE="dev"        # dev | release
 ALLOW_ADHOC_SIGNING="${ALLOW_ADHOC_SIGNING:-0}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
+SKIP_MODELS=0
 
 usage() {
     cat <<EOF
-Usage: $0 [--dev|--release] [--install|-i] [--allow-adhoc]
+Usage: $0 [--dev|--release] [--install|-i] [--allow-adhoc] [--no-models]
 
 Modes:
   (default)   Dev mode — debug binary, no venv bundle, no DMG. Fast iteration.
@@ -27,6 +28,7 @@ Modes:
 Options:
   --install, -i   Copy app to /Applications and launch after build.
   --allow-adhoc   Allow ad-hoc signing (dev mode uses ad-hoc automatically).
+  --no-models     Skip model zip packaging (DMG only).
 
 Environment:
   SIGN_IDENTITY           Code signing identity, e.g. "Apple Development: You (TEAMID)"
@@ -40,6 +42,7 @@ for arg in "$@"; do
         --release)      MODE="release" ;;
         --install|-i)   INSTALL_APP=1 ;;
         --allow-adhoc)  ALLOW_ADHOC_SIGNING=1 ;;
+        --no-models)    SKIP_MODELS=1 ;;
         --help|-h)      usage; exit 0 ;;
         *)
             echo "Unknown argument: $arg" >&2
@@ -184,6 +187,7 @@ if [ "$MODE" = "release" ]; then
     DMG_SIZE=$(du -sh "$DMG_PATH" | awk '{print $1}')
     echo "  ✅ DMG: $DMG_PATH ($DMG_SIZE)"
 
+    if [ "$SKIP_MODELS" = "0" ]; then
     echo ""
     echo "📦 Packaging model archives..."
     HF_CACHE="$HOME/.cache/huggingface/hub"
@@ -247,6 +251,7 @@ INSTALL_EOF
     package_model_archive "qwen3-asr-1.7b"  "mlx-community/Qwen3-ASR-1.7B-8bit"
     package_model_archive "qwen2.5-1.5b-translate" "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
     package_model_archive "whisper-large-v3" "mlx-community/whisper-large-v3-mlx"
+    fi  # SKIP_MODELS
 fi
 
 # ── Step 5: Report ────────────────────────────────────────────────────────────
