@@ -170,7 +170,7 @@ if [ "$MODE" = "release" ]; then
     cp -R "$APP_BUNDLE" "$DMG_STAGING/"
     ln -s /Applications "$DMG_STAGING/Applications"
     hdiutil create -volname "$APP_NAME $APP_VERSION" -srcfolder "$DMG_STAGING" -ov -format UDZO "$DMG_PATH" 2>&1
-    rm -rf "$DMG_STAGING"
+    rm -rf "$DMG_STAGING" || true
     DMG_SIZE=$(du -sh "$DMG_PATH" | awk '{print $1}')
     echo "  ✅ DMG: $DMG_PATH ($DMG_SIZE)"
 
