@@ -120,7 +120,6 @@ class SetupViewModel: ObservableObject {
                 self.updateAllDone()
                 // Start WhisperBridge
                 WhisperBridge.shared.start { success in
-                    AppState.shared.hasPythonBackend = success
                     AppState.shared.updatePermissionState()
                     logInfo("Setup", "WhisperBridge start: \(success)")
                 }

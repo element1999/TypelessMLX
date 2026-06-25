@@ -94,11 +94,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
                 item.target = self
                 menu.addItem(item)
             }
-            if !appState.hasPythonBackend {
-                let item = NSMenuItem(title: "  ⚠️ Python 后端：未就绪", action: #selector(showSetup), keyEquivalent: "")
-                item.target = self
-                menu.addItem(item)
-            }
         }
 
         menu.addItem(NSMenuItem.separator())

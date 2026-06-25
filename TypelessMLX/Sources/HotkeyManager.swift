@@ -212,29 +212,6 @@ class HotkeyManager {
         recordingStartTime = Date()
         lock.unlock()
 
-        // If bridge was stopped by idle timer, restart it first
-        let modelType = appState.selectedModel.modelType
-        if modelType != "macos", !appState.hasPythonBackend {
-            if appState.showFloatingOverlay {
-                overlay?.show(text: "⏳ 加载模型中...", isRecording: false)
-            }
-            lock.lock()
-            isRecording = false
-            isProcessing = false
-            lock.unlock()
-            WhisperBridge.shared.start { [weak self] success in
-                DispatchQueue.main.async {
-                    AppState.shared.hasPythonBackend = success
-                    if success {
-                        self?.startRecording()
-                    } else {
-                        self?.overlay?.hide()
-                    }
-                }
-            }
-            return
-        }
-
         appState.setStatus(.recording)
         appState.liveTranscriptionConfirmedText = ""
         appState.liveTranscriptionUnconfirmedText = ""

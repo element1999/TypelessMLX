@@ -613,9 +613,6 @@ class WhisperBridge {
             self?.idleTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: false) { [weak self] _ in
                 logInfo("WhisperBridge", "Idle timeout — stopping Python process to save power")
                 self?.stopProcess()
-                DispatchQueue.main.async {
-                    AppState.shared.hasPythonBackend = false
-                }
             }
         }
     }

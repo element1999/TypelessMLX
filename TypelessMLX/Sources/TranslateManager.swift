@@ -38,7 +38,6 @@ class TranslateManager {
             ov.show(direction: direction, near: pt)
         }
 
-        guard appState?.hasPythonBackend == true else { return }
         WhisperBridge.shared.translate(text: trimmed,
                                        textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
             let translation = (try? result.get()) ?? ""

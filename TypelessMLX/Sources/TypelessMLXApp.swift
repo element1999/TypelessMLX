@@ -142,7 +142,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if WhisperBridge.isVenvReady() {
             logInfo("App", "Python venv ready — starting WhisperBridge")
             WhisperBridge.shared.start { [weak self] success in
-                self?.appState.hasPythonBackend = success
                 self?.appState.updatePermissionState()
                 logInfo("App", "WhisperBridge started: \(success)")
             }

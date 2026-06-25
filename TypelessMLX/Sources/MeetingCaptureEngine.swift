@@ -181,10 +181,8 @@ class MeetingCaptureEngine: NSObject {
         lastEnglishSentForTranslation = ""
         translationGeneration += 1
 
-        if appState?.hasPythonBackend == true {
-            let prompt = DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)
-            WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: subtitleModelPath, initialPrompt: prompt, reset: true) { _ in }
-        }
+        let prompt = DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)
+        WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: subtitleModelPath, initialPrompt: prompt, reset: true) { _ in }
 
         chunkTimer = Timer.scheduledTimer(withTimeInterval: Self.chunkInterval, repeats: true) { [weak self] _ in
             self?.sendNextChunk()
@@ -198,7 +196,6 @@ class MeetingCaptureEngine: NSObject {
 
     private func sendNextChunk() {
         guard !subtitleInFlight else { return }
-        guard appState?.hasPythonBackend == true else { return }
 
         pcmLock.lock()
         guard pcmBuffer.count >= Self.minChunkSamples else {
@@ -258,11 +255,6 @@ class MeetingCaptureEngine: NSObject {
     }
 
     private func triggerTranslation(for text: String) {
-        guard appState?.hasPythonBackend == true else {
-            transcriptOverlay?.commitEntry(english: text, chinese: "")
-            lastPartialText = ""
-            return
-        }
         let chunk = String(text.suffix(Self.maxTranslationChars))
         guard chunk != lastEnglishSentForTranslation else { return }
         lastEnglishSentForTranslation = chunk

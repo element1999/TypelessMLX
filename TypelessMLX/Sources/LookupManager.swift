@@ -70,10 +70,6 @@ class LookupManager {
             ov.show(word: word, near: pt)
         }
 
-        guard appState?.hasPythonBackend == true else {
-            logInfo("LookupManager", "Python backend not ready, overlay shows 查询中… only")
-            return
-        }
         WhisperBridge.shared.lookup(text: word,
                                     textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
             let entry = (try? result.get()) ?? ""

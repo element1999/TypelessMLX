@@ -50,7 +50,6 @@ class AppState: ObservableObject {
     @Published var permissionState: PermissionState = .missingPermissions
     @Published var hasMicPermission: Bool = false
     @Published var hasAccessibilityPermission: Bool = false
-    @Published var hasPythonBackend: Bool = false
     @Published var hasScreenCapturePermission: Bool = false
     @Published var isTeamsMeetingActive: Bool = false
 
@@ -199,14 +198,12 @@ class AppState: ObservableObject {
     }
 
     func updatePermissionState() {
-        if hasMicPermission && hasAccessibilityPermission && hasPythonBackend {
+        if hasMicPermission && hasAccessibilityPermission {
             permissionState = .ready
-        } else if !hasMicPermission || !hasAccessibilityPermission {
-            permissionState = .missingPermissions
         } else {
-            permissionState = .error
+            permissionState = .missingPermissions
         }
-        logInfo("AppState", "Permission state: \(permissionState.rawValue) [mic=\(hasMicPermission) ax=\(hasAccessibilityPermission) python=\(hasPythonBackend)]")
+        logInfo("AppState", "Permission state: \(permissionState.rawValue) [mic=\(hasMicPermission) ax=\(hasAccessibilityPermission)]")
     }
 
     func refreshPermissions() {
