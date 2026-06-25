@@ -4,7 +4,12 @@ import PackageDescription
 let package = Package(
     name: "TypelessMLX",
     platforms: [
-        .macOS(.v13)
+        .macOS(.v14)
+    ],
+    dependencies: [
+        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "1.0.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-examples", exact: "2.29.1"),
+        .package(url: "https://github.com/genericgroup/sherpa-onnx-spm", exact: "1.0.4"),
     ],
     targets: [
         .target(
@@ -20,7 +25,14 @@ let package = Package(
         ),
         .executableTarget(
             name: "TypelessMLX",
-            dependencies: ["TypelessMLXAudioTapSupport", "TypelessMLXAudioInputSupport"],
+            dependencies: [
+                "TypelessMLXAudioTapSupport",
+                "TypelessMLXAudioInputSupport",
+                .product(name: "WhisperKit", package: "WhisperKit"),
+                .product(name: "MLXLLM", package: "mlx-swift-examples"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                .product(name: "CSherpaOnnx", package: "sherpa-onnx-spm"),
+            ],
             path: "TypelessMLX/Sources",
             linkerSettings: [
                 .linkedFramework("Cocoa"),
