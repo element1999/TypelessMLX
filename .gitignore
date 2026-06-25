@@ -3,6 +3,9 @@
 *.o
 *.d
 
+# Worktrees
+.worktrees/
+
 # App bundle / DMG output
 build/
 *.dmg
