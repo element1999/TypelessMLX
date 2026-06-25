@@ -169,11 +169,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
         menu.addItem(NSMenuItem.separator())
 
-        // Setup / Settings
-        let setupItem = NSMenuItem(title: "设置与安装...", action: #selector(showSetup), keyEquivalent: "")
-        setupItem.target = self
-        menu.addItem(setupItem)
-
         let settingsItem = NSMenuItem(title: "偏好设置...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
@@ -246,10 +241,6 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func openAccessibilitySettings() {
         TextPaster.openAccessibilitySettings()
-    }
-
-    @objc private func showSetup() {
-        SetupWindowController.shared.show()
     }
 
     @objc private func copyLastTranscription() {

@@ -385,13 +385,6 @@ struct ModelSettingsTab: View {
                 }
 }
 
-            Section {
-                Button("打开设置与安装窗口") {
-                    SetupWindowController.shared.show()
-                }
-                .buttonStyle(.link)
-                .help("安装 Python 环境")
-            }
         }
         .formStyle(.grouped)
     }

@@ -36,9 +36,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             logInfo("App", "Speech recognition authorization: \(granted)")
         }
 
-        // Check if Python venv is ready; if not, show setup
-        checkBackendAndSetup()
-
         // Setup hotkey (works even before permissions are fully granted)
         HotkeyManager.shared.setup(appState: appState)
 
@@ -66,7 +63,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         permissionCheckTimer?.invalidate()
         logInfo("App", "TypelessMLX shutting down")
         AudioRecorder.shared.forceReset()
-        WhisperBridge.shared.stopProcess()
         MeetingCaptureEngine.shared.stop()
     }
 
@@ -134,23 +130,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // If subtitle is enabled but stream not active, retry (e.g. after granting screen capture)
             if self.appState.meetingSubtitleEnabled && !self.appState.isTeamsMeetingActive {
                 MeetingCaptureEngine.shared.setEnabled(true)
-            }
-        }
-    }
-
-    private func checkBackendAndSetup() {
-        if WhisperBridge.isVenvReady() {
-            logInfo("App", "Python venv ready — starting WhisperBridge")
-            WhisperBridge.shared.start { [weak self] success in
-                self?.appState.updatePermissionState()
-                logInfo("App", "WhisperBridge started: \(success)")
-            }
-        } else {
-            logInfo("App", "Python venv not ready — showing setup")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                SetupWindowController.shared.show {
-                    logInfo("App", "Setup complete")
-                }
             }
         }
     }

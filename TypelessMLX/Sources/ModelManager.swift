@@ -49,7 +49,7 @@ class ModelManager: ObservableObject {
 
     func download(_ model: MLXModel) {
         guard downloadingModelID == nil else { return }
-        guard !model.isLocal else { return }  // local models use SetupWindowController
+        guard !model.isLocal else { return }  // local models don't need downloading
 
         DispatchQueue.main.async {
             self.downloadingModelID = model.id
@@ -60,7 +60,7 @@ class ModelManager: ObservableObject {
 
         queue.async { [weak self] in
             guard let self = self else { return }
-            let python = WhisperBridge.shared.pythonPath
+            let python = Self.pythonPath
             let script = """
 import sys, os
 os.environ['HF_HOME'] = os.path.expanduser('~/.cache/huggingface')
@@ -72,7 +72,7 @@ sys.stdout.flush()
             let proc = Process()
             proc.executableURL = URL(fileURLWithPath: python)
             proc.arguments = ["-c", script]
-            proc.environment = WhisperBridge.makeEnv()
+            proc.environment = Self.makeDownloadEnv()
 
             let outPipe = Pipe()
             let errPipe = Pipe()
@@ -141,6 +141,31 @@ sys.stdout.flush()
             logInfo("ModelManager", "Deleted cache: \(cacheURL.lastPathComponent)")
         }
         DispatchQueue.main.async { self.cachedSizes[model.id] = 0 }
+    }
+
+    // MARK: - Python helpers for HuggingFace downloads
+
+    private static var pythonPath: String {
+        let venvPython = NSHomeDirectory() + "/.local/share/typelessmlx/venv/bin/python"
+        if FileManager.default.fileExists(atPath: venvPython) { return venvPython }
+        for path in ["/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3", "/usr/bin/python3"] {
+            if FileManager.default.fileExists(atPath: path) { return path }
+        }
+        return "python3"
+    }
+
+    private static func makeDownloadEnv() -> [String: String] {
+        var env = ProcessInfo.processInfo.environment
+        let venvBin = NSHomeDirectory() + "/.local/share/typelessmlx/venv/bin"
+        let paths = [venvBin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
+        env["PATH"] = (paths + [(env["PATH"] ?? "")]).joined(separator: ":")
+        env["HF_HOME"] = NSHomeDirectory() + "/.cache/huggingface"
+        env["PYTHONUNBUFFERED"] = "1"
+        env["HF_HUB_OFFLINE"] = "0"
+        if env["HF_ENDPOINT"] == nil {
+            env["HF_ENDPOINT"] = "https://hf-mirror.com"
+        }
+        return env
     }
 
     // MARK: - Paths
