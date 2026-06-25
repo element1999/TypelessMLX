@@ -24,7 +24,7 @@ actor ASRService {
     /// Lazily starts the asr-server subprocess on first call; restarts it when
     /// the resolved model path changes.
     func transcribe(url: URL, language: String? = nil) async throws -> String {
-        let modelPath = resolveModelPath(AppState.shared.resolvedModelPath)
+        let modelPath = resolveModelPath(await MainActor.run { AppState.shared.resolvedModelPath })
 
         if process == nil || !isProcessRunning() || currentModelPath != modelPath {
             try await startServer(modelPath: modelPath)
@@ -148,6 +148,7 @@ actor ASRService {
         request.setValue("multipart/form-data; boundary=\(boundary)",
                          forHTTPHeaderField: "Content-Type")
 
+        // Synchronous read is acceptable: WAV chunks are ~16KB (0.5s at 16kHz mono)
         let audioData = try Data(contentsOf: url)
         var body = Data()
 
@@ -219,7 +220,7 @@ actor ASRService {
         let cacheBase = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)/snapshots")
         let snapshots = (try? FileManager.default.contentsOfDirectory(atPath: cacheBase)) ?? []
-        if let snapshot = snapshots.first {
+        if let snapshot = snapshots.sorted().last {
             return (cacheBase as NSString).appendingPathComponent(snapshot)
         }
         return modelPath  // fallback: return as-is, server will error with a clear message
