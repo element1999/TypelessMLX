@@ -8,8 +8,7 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 ENTITLEMENTS="$PROJECT_DIR/TypelessMLX/TypelessMLX.entitlements"
 INSTALL_DIR="/Applications/$APP_NAME.app"
 APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/TypelessMLX/Info.plist" 2>/dev/null || echo "0.0.0")
-VENV_BUNDLED=0   # set to 1 after venv is successfully copied
-DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"  # recalculated after venv step
+DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
 
 INSTALL_APP=0
 MODE="dev"        # dev | release
@@ -126,27 +125,18 @@ cp backend/requirements.txt "$APP_BUNDLE/Contents/Resources/backend/"
 echo "  ✅ Python backend copied"
 
 if [ "$MODE" = "release" ]; then
-    VENV_SRC="$HOME/.local/share/typelessmlx/venv"
-    if [ -d "$VENV_SRC" ]; then
-        echo "  📦 Bundling Python venv (resolving symlinks — this takes a while)..."
-        cp -RL "$VENV_SRC" "$APP_BUNDLE/Contents/Resources/venv"
-        # Bundle libpython3.12.dylib — the Python binary links to it via @rpath/../lib
-        # but it lives in the uv-managed Python installation, not in the venv itself.
-        LIBPYTHON=$(find "$HOME/.local/share/uv" "$HOME/.pyenv" /opt/homebrew \
-                         -name "libpython3.12.dylib" 2>/dev/null | head -1)
-        if [ -n "$LIBPYTHON" ]; then
-            cp "$LIBPYTHON" "$APP_BUNDLE/Contents/Resources/venv/lib/"
-            echo "  ✅ libpython3.12.dylib bundled"
-        else
-            echo "  ⚠️  libpython3.12.dylib not found — venv may fail on other machines"
-        fi
-        VENV_BUNDLED=1
-        echo "  ✅ Venv bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/venv" | awk '{print $1}'))"
+    echo "  🦀 Building asr-server (Rust + MLX)..."
+    ASR_RS_DIR="$PROJECT_DIR/vendor/qwen3_asr_rs"
+    if [ -d "$ASR_RS_DIR" ]; then
+        (cd "$ASR_RS_DIR" && source "$HOME/.cargo/env" && cargo build --release --features mlx 2>&1 | tail -3)
+        mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
+        cp "$ASR_RS_DIR/target/release/asr-server" "$APP_BUNDLE/Contents/Resources/bin/"
+        chmod +x "$APP_BUNDLE/Contents/Resources/bin/asr-server"
+        echo "  ✅ asr-server bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/bin/asr-server" | awk '{print $1}'))"
     else
-        echo "  ⚠️  No venv at $VENV_SRC — skipping venv bundle"
+        echo "  ❌ vendor/qwen3_asr_rs not found"
+        exit 1
     fi
-else
-    echo "  ℹ️  Dev mode: using system venv at ~/.local/share/typelessmlx/venv"
 fi
 
 if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
@@ -169,12 +159,6 @@ codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|
 
 # ── Step 4: DMG + model archives (release only) ───────────────────────────────
 if [ "$MODE" = "release" ]; then
-    # Recalculate DMG name now that we know whether venv was bundled
-    if [ "$VENV_BUNDLED" = "1" ]; then
-        DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}-full.dmg"
-    else
-        DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
-    fi
     echo ""
     echo "💿 Creating DMG..."
     DMG_STAGING="$BUILD_DIR/dmg-staging"
@@ -291,6 +275,5 @@ if [ "$MODE" = "release" ]; then
     echo "  1. 授权麦克风访问（系统设置 → 隐私与安全 → 麦克风）"
     echo "  2. 授权辅助功能（系统设置 → 隐私与安全 → 辅助功能）"
     echo "  3. 授权输入监控（系统设置 → 隐私与安全 → 输入监控）"
-    echo "  4. App 启动后会自动显示设置窗口，点击"开始安装"复制 Python 环境"
-    echo "  5. 完成后按 Right Option 即可开始录音"
+    echo "  4. 完成后按 Right Option 即可开始录音"
 fi
