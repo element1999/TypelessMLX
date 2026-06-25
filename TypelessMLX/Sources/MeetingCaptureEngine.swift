@@ -3,8 +3,8 @@ import AVFoundation
 import AppKit
 import Foundation
 
-/// Captures all system audio via ScreenCaptureKit, sends 0.5s PCM chunks to Python
-/// Qwen3-ASR (with built-in VAD) for real-time subtitles, and translates to Chinese via Qwen.
+/// Captures all system audio via ScreenCaptureKit, sends 0.5s PCM chunks to the native
+/// ASRService (Rust/MLX), and implements the subtitle VAD + translation pipeline in Swift.
 class MeetingCaptureEngine: NSObject {
     static let shared = MeetingCaptureEngine()
 
@@ -22,17 +22,20 @@ class MeetingCaptureEngine: NSObject {
 
     // Subtitle streaming state — main thread only
     private var chunkTimer: Timer?
-    private var translationTimer: Timer?
-    private var translationGeneration: Int = 0
     private var lastPartialText: String = ""
-    private var lastEnglishSentForTranslation: String = ""
     private var subtitleInFlight: Bool = false
     private var chunkSeq: Int = 0
 
+    // Subtitle VAD pipeline state — main thread only
+    private var subtitlePrevText: String = ""
+    private var subtitleStableCount: Int = 0
+    private var subtitleCommittedPrefix: String = ""
+    private var subtitleUtteranceSentences: [(en: String, zh: String)] = []
+    private static let subtitleStableThreshold = 2
+    private static let subtitleMaxSamples = 15 * 16000
+
     private static let chunkInterval: TimeInterval = 0.5
     private static let minChunkSamples = 8000        // 0.5s at 16kHz
-    private static let translationDebounce: TimeInterval = 1.0
-    private static let maxTranslationChars: Int = 150
 
     // Guards async permission/start callbacks so "stop" cannot be raced by delayed callbacks.
     private let enableStateLock = NSLock()
@@ -163,9 +166,7 @@ class MeetingCaptureEngine: NSObject {
     private func stopAll() {
         DispatchQueue.main.async { [weak self] in
             self?.chunkTimer?.invalidate()
-            self?.translationTimer?.invalidate()
             self?.chunkTimer = nil
-            self?.translationTimer = nil
         }
         stopStream()
         pcmLock.lock()
@@ -178,16 +179,15 @@ class MeetingCaptureEngine: NSObject {
     private func startSubtitleStreaming() {
         subtitleInFlight = false
         lastPartialText = ""
-        lastEnglishSentForTranslation = ""
-        translationGeneration += 1
-
-        let prompt = DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)
-        WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: subtitleModelPath, initialPrompt: prompt, reset: true) { _ in }
+        subtitlePrevText = ""
+        subtitleStableCount = 0
+        subtitleCommittedPrefix = ""
+        subtitleUtteranceSentences = []
 
         chunkTimer = Timer.scheduledTimer(withTimeInterval: Self.chunkInterval, repeats: true) { [weak self] _ in
             self?.sendNextChunk()
         }
-        logInfo("MeetingCaptureEngine", "Subtitle streaming started (Qwen3-ASR)")
+        logInfo("MeetingCaptureEngine", "Subtitle streaming started (ASRService)")
     }
 
     private var subtitleModelPath: String {
@@ -212,79 +212,126 @@ class MeetingCaptureEngine: NSObject {
         guard writeWAV(samples: chunk, to: url) else { return }
 
         subtitleInFlight = true
-        WhisperBridge.shared.streamSubtitle(audioURL: url, modelPath: subtitleModelPath, initialPrompt: DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)) { [weak self] result in
+        Task { [weak self] in
             guard let self = self else { return }
-            self.subtitleInFlight = false
-            try? FileManager.default.removeItem(at: url)
-            switch result {
-            case .success(let chunk):
-                DispatchQueue.main.async { self.handleSubtitleChunk(chunk) }
-            case .failure(let error):
-                logError("MeetingCaptureEngine", "Subtitle stream error: \(error.localizedDescription)")
+            do {
+                let text = try await ASRService.shared.transcribe(url: url)
+                await MainActor.run { self.processSubtitleASRResult(text) }
+            } catch {
+                logError("MeetingCaptureEngine", "ASR error: \(error.localizedDescription)")
             }
+            try? FileManager.default.removeItem(at: url)
+            await MainActor.run { self.subtitleInFlight = false }
         }
     }
 
-    private func handleSubtitleChunk(_ chunk: WhisperBridge.SubtitleChunk) {
-        if chunk.committed {
-            // Transcript: write full utterance once at commit (no duplicates)
-            for pair in chunk.utteranceSentences {
+    // MARK: - Subtitle Pipeline Helpers
+
+    /// Split punctuated text into (completeSentences, incompleteTail).
+    /// Uses \.(?=\s) — NOT \.(?=\s|$) to avoid false positives from Qwen3-ASR terminal period.
+    private func getCompletedSentences(_ text: String) -> ([String], String) {
+        guard !text.isEmpty else { return ([], "") }
+        var sentences: [String] = []
+        var remaining = text
+        let pattern = try! NSRegularExpression(pattern: "[。！？!?]+|\\.(?=\\s)")
+        var searchRange = remaining.startIndex..<remaining.endIndex
+        while let match = pattern.firstMatch(in: remaining, range: NSRange(searchRange, in: remaining)) {
+            let matchEnd = Range(match.range, in: remaining)!.upperBound
+            let sentence = String(remaining[..<matchEnd]).trimmingCharacters(in: .whitespaces)
+            if !sentence.isEmpty { sentences.append(sentence) }
+            searchRange = matchEnd..<remaining.endIndex
+        }
+        let tail = String(remaining[searchRange]).trimmingCharacters(in: .whitespaces)
+        return (sentences, tail)
+    }
+
+    /// Return true if ASR echoed its own system prompt (silence/noise output).
+    private func isSilenceHallucination(_ text: String) -> Bool {
+        let known = [
+            "请以简体中文输出语音识别结果，加上适当标点符号，不要使用繁体中文。",
+            "请输出语音识别结果，保持原始语言，不要添加解释。"
+        ]
+        let t = text.trimmingCharacters(in: .whitespaces)
+        return known.contains { t == $0 || t.hasPrefix($0) || $0.hasPrefix(t) }
+    }
+
+    // MARK: - Subtitle ASR Result Processing (main thread)
+
+    @MainActor
+    private func processSubtitleASRResult(_ rawText: String) {
+        let text = isSilenceHallucination(rawText) ? "" : rawText
+        logDebug("MeetingCaptureEngine", "Subtitle ASR: \(text.prefix(60))")
+
+        // Find new complete sentences in suffix after committed prefix
+        let suffix: String
+        if !subtitleCommittedPrefix.isEmpty && text.hasPrefix(subtitleCommittedPrefix) {
+            suffix = String(text.dropFirst(subtitleCommittedPrefix.count)).trimmingCharacters(in: .whitespaces)
+        } else {
+            subtitleCommittedPrefix = ""
+            suffix = text
+        }
+
+        let (newSentences, tail) = getCompletedSentences(suffix)
+
+        // Eagerly translate new complete sentences
+        for raw in newSentences {
+            let clean = PuncService.shared.restore(raw)
+            subtitleCommittedPrefix += raw
+            let idx = subtitleUtteranceSentences.count
+            subtitleUtteranceSentences.append((en: clean, zh: ""))
+            SubtitleBar.shared.updateLive(clean)
+            Task { [weak self, clean, idx] in
+                guard let self = self else { return }
+                let zh = (try? await LLMService.shared.translate(clean)) ?? ""
+                await MainActor.run {
+                    if idx < self.subtitleUtteranceSentences.count {
+                        self.subtitleUtteranceSentences[idx].zh = zh
+                    }
+                    SubtitleBar.shared.commitSentence(english: clean, chinese: zh)
+                }
+            }
+        }
+
+        // VAD stability check
+        let forceCommit = pcmBuffer.count >= Self.subtitleMaxSamples
+        if text == subtitlePrevText {
+            subtitleStableCount += 1
+        } else {
+            subtitleStableCount = 0
+            subtitlePrevText = text
+        }
+        let shouldCommit = (subtitleStableCount >= Self.subtitleStableThreshold && !text.isEmpty) || forceCommit
+
+        if shouldCommit {
+            let tailClean = tail.isEmpty ? "" : PuncService.shared.restore(tail)
+            let allSentences = subtitleUtteranceSentences
+            // Reset state
+            subtitlePrevText = ""
+            subtitleStableCount = 0
+            subtitleCommittedPrefix = ""
+            subtitleUtteranceSentences = []
+            lastPartialText = ""
+
+            // Write all utterance sentences to transcript
+            for pair in allSentences {
                 transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
             }
-            if !chunk.text.isEmpty {
-                transcriptOverlay?.commitEntry(english: chunk.text, chinese: chunk.chinese)
+            // Translate and commit tail
+            if !tailClean.isEmpty {
+                Task { [weak self, tailClean] in
+                    guard let self = self else { return }
+                    let zh = (try? await LLMService.shared.translate(tailClean)) ?? ""
+                    await MainActor.run {
+                        self.transcriptOverlay?.commitEntry(english: tailClean, chinese: zh)
+                        SubtitleBar.shared.commitSentence(english: tailClean, chinese: zh)
+                    }
+                }
             }
-            // Subtitle bar: show tail or last eager sentence
-            if !chunk.text.isEmpty {
-                SubtitleBar.shared.commitSentence(english: chunk.text, chinese: chunk.chinese)
-            } else if let last = chunk.eagerSentences.last {
-                SubtitleBar.shared.commitSentence(english: last.en, chinese: last.zh)
-            }
-            lastPartialText = ""
-            lastEnglishSentForTranslation = ""
         } else {
-            // Subtitle bar only (not transcript) for real-time eager sentences
-            if let latest = chunk.eagerSentences.last {
-                SubtitleBar.shared.commitSentence(english: latest.en, chinese: latest.zh)
-                lastPartialText = latest.en
-            } else if !chunk.text.isEmpty, chunk.text != lastPartialText {
-                SubtitleBar.shared.updateLive(chunk.text)
-                lastPartialText = chunk.text
-            }
-        }
-    }
-
-    private func triggerTranslation(for text: String) {
-        let chunk = String(text.suffix(Self.maxTranslationChars))
-        guard chunk != lastEnglishSentForTranslation else { return }
-        lastEnglishSentForTranslation = chunk
-
-        translationGeneration += 1
-        let gen = translationGeneration
-        let displayText = text
-        logDebug("MeetingCaptureEngine", "Translating (\(chunk.count) chars, gen=\(gen))")
-
-        WhisperBridge.shared.translate(text: chunk) { [weak self] result in
-            guard let self = self else { return }
-            DispatchQueue.main.async {
-                guard gen == self.translationGeneration else {
-                    logDebug("MeetingCaptureEngine", "Translation gen \(gen) stale, discarding")
-                    return
-                }
-                switch result {
-                case .success(let chinese) where !chinese.isEmpty:
-                    logInfo("MeetingCaptureEngine", "Translation: '\(chinese.prefix(40))'")
-                    self.transcriptOverlay?.commitEntry(english: displayText, chinese: chinese)
-                    self.lastPartialText = ""
-                    self.lastEnglishSentForTranslation = ""
-                case .success:
-                    logWarn("MeetingCaptureEngine", "Translation returned empty")
-                    self.transcriptOverlay?.commitEntry(english: displayText, chinese: "")
-                    self.lastPartialText = ""
-                    self.lastEnglishSentForTranslation = ""
-                case .failure(let error):
-                    logError("MeetingCaptureEngine", "Translation failed: \(error.localizedDescription)")
-                }
+            // Show partial tail as live preview
+            if !tail.isEmpty, tail != lastPartialText {
+                lastPartialText = tail
+                SubtitleBar.shared.updateLive(tail)
             }
         }
     }
