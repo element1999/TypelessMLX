@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What This Is
 
-TypelessMLX is a macOS menu-bar app (Apple Silicon, macOS 13+) for private, offline voice dictation, real-time bilingual subtitles, word lookup, sentence translation, and OCR. All inference runs on-device via MLX.
+TypelessMLX is a macOS menu-bar app (Apple Silicon, macOS 14+) for private, offline voice dictation, real-time bilingual subtitles, word lookup, sentence translation, and OCR. All inference runs on-device via MLX.
 
 ## Build Commands
 
