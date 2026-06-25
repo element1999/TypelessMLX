@@ -199,13 +199,13 @@ def translate_to_chinese_llm(text: str) -> str:
         from mlx_lm import generate
         # Put the instruction inside the user turn for small models that ignore system prompts
         messages = [
-            {"role": "user", "content": f"将以下英文翻译成简体中文，只输出中文译文，不要输出英文：\n{text}"},
+            {"role": "user", "content": f"将以下英文翻译成简体中文，只输出中文译文，不要输出英文：\n「{text}」"},
         ]
         tok = _llm_translator_tokenizer
         if hasattr(tok, "apply_chat_template"):
             prompt = tok.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         else:
-            prompt = f"将以下英文翻译成简体中文，只输出译文：{text}"
+            prompt = f"将以下英文翻译成简体中文，只输出译文：「{text}」"
         result = generate(_llm_translator_model, tok, prompt=prompt, max_tokens=400, verbose=False)
         result = result.strip()
         sys.stderr.write(f"[TypelessMLX] LLM translate result: {repr(result[:80])}\n")
@@ -385,7 +385,7 @@ def translate_to_english_llm(text: str) -> str:
         from mlx_lm import generate
         messages = [
             {"role": "system", "content": "You are a translator. Translate the Chinese text to natural, fluent English. Output only the translation, no explanations."},
-            {"role": "user", "content": text},
+            {"role": "user", "content": f"「{text}」"},
         ]
         tok = _llm_translator_tokenizer
         if hasattr(tok, "apply_chat_template"):
