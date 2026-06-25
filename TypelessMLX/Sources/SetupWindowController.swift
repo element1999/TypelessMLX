@@ -171,9 +171,33 @@ class SetupViewModel: ObservableObject {
             appendLog("   ❌ 复制失败: \(error.localizedDescription)")
             return false
         }
-        // Verify
+        // Remove quarantine attribute inherited from the downloaded DMG — without this
+        // macOS Gatekeeper blocks the Python binary and all .so extensions from running.
+        appendLog("   正在清除隔离属性...")
+        let xattr = Process()
+        xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
+        xattr.arguments = ["-r", "-d", "com.apple.quarantine", dest]
+        try? xattr.run()
+        xattr.waitUntilExit()
+
+        // Verify — capture stderr for diagnostics
         if !WhisperBridge.isVenvReady() {
-            appendLog("   ❌ Python 环境验证失败（包导入错误），请重试或联系开发者")
+            let python = dest + "/bin/python"
+            let testProc = Process()
+            testProc.executableURL = URL(fileURLWithPath: python)
+            testProc.arguments = ["-c", "import mlx_whisper, mlx_audio, huggingface_hub"]
+            testProc.environment = WhisperBridge.makeEnv()
+            let errPipe = Pipe()
+            testProc.standardError = errPipe
+            testProc.standardOutput = FileHandle.nullDevice
+            try? testProc.run()
+            testProc.waitUntilExit()
+            let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(),
+                                   encoding: .utf8) ?? ""
+            appendLog("   ❌ Python 环境验证失败:")
+            for line in errOutput.components(separatedBy: .newlines) where !line.isEmpty {
+                appendLog("      \(line)")
+            }
             return false
         }
         return true
