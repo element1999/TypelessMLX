@@ -38,11 +38,21 @@ class TranslateManager {
             ov.show(direction: direction, near: pt)
         }
 
-        WhisperBridge.shared.translate(text: trimmed,
-                                       textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
-            let translation = (try? result.get()) ?? ""
-            logInfo("TranslateManager", "translation: \(translation.prefix(60))")
-            DispatchQueue.main.async { self?.overlay?.setContent(translation) }
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let translation = try await LLMService.shared.translate(trimmed)
+                await MainActor.run {
+                    if translation.isEmpty {
+                        self.overlay?.setContent("无结果")
+                    } else {
+                        self.overlay?.setContent(translation)
+                    }
+                }
+            } catch {
+                logError("TranslateManager", "translate failed: \(error)")
+                await MainActor.run { self.overlay?.setContent("翻译失败") }
+            }
         }
     }
 

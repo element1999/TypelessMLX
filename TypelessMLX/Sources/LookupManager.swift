@@ -70,11 +70,21 @@ class LookupManager {
             ov.show(word: word, near: pt)
         }
 
-        WhisperBridge.shared.lookup(text: word,
-                                    textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
-            let entry = (try? result.get()) ?? ""
-            logInfo("LookupManager", "lookup result: \(entry.prefix(60))")
-            DispatchQueue.main.async { self?.overlay?.setContent(entry) }
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let entry = try await LLMService.shared.lookup(word)
+                await MainActor.run {
+                    if entry.isEmpty {
+                        self.overlay?.setContent("无结果")
+                    } else {
+                        self.overlay?.setContent(entry)
+                    }
+                }
+            } catch {
+                logError("LookupManager", "lookup failed: \(error)")
+                await MainActor.run { self.overlay?.setContent("查询失败") }
+            }
         }
     }
 
