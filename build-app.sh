@@ -119,7 +119,7 @@ cp "$BINARY_SRC" "$APP_BUNDLE/Contents/MacOS/TypelessMLX"
 cp "TypelessMLX/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
 mkdir -p "$APP_BUNDLE/Contents/Resources/backend"
-cp backend/transcribe_server.py "$APP_BUNDLE/Contents/Resources/backend/"
+cp backend/translate_server.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/convert.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/requirements.txt "$APP_BUNDLE/Contents/Resources/backend/"
 echo "  ✅ Python backend copied"
