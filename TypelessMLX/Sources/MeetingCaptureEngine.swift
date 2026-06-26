@@ -1,10 +1,11 @@
-import ScreenCaptureKit
 import AVFoundation
 import AppKit
 import Foundation
+import ScreenCaptureKit
+import SpeechVAD
 
-/// Captures all system audio via ScreenCaptureKit, sends 0.5s PCM chunks to the native
-/// ASRService (Rust/MLX), and implements the subtitle VAD + translation pipeline in Swift.
+/// Captures all system audio via ScreenCaptureKit, detects speech boundaries with
+/// Silero VAD, and runs Qwen3-ASR + translation on each confirmed speech segment.
 class MeetingCaptureEngine: NSObject {
     static let shared = MeetingCaptureEngine()
 
@@ -15,29 +16,23 @@ class MeetingCaptureEngine: NSObject {
     private let streamLock = NSLock()
     private var activeStream: SCStream?
 
-    // PCM accumulation (written from SCStream callback queue, read from timer)
+    // PCM accumulation (written from SCStream callback, drained on subtitleQueue)
     private let pcmLock = NSLock()
     private var pcmBuffer: [Float] = []
-    private static let maxBufferSamples = 16000 * 10  // 10s cap to prevent unbounded growth
+    private static let maxBufferSamples = 16000 * 10  // 10 s safety cap
 
-    // Subtitle streaming state — main thread only
-    private var chunkTimer: Timer?
-    private var lastPartialText: String = ""
-    private var subtitleInFlight: Bool = false
-    private var chunkSeq: Int = 0
+    // Subtitle VAD — accessed only on subtitleQueue
+    private let subtitleQueue = DispatchQueue(label: "me.typelessmlx.subtitle-vad",
+                                              qos: .userInteractive)
+    private var vadModel: SileroVADModel?
+    private var vadProcessor: StreamingVADProcessor?
+    private var rollingBuffer: [Float] = []
+    private var rollingBufferStart: Int = 0   // cumulative samples removed from buffer front
+    private var speechStartSample: Int? = nil  // rolling-buffer-relative index when speech started
 
-    // Subtitle VAD pipeline state — main thread only
-    private var subtitlePrevText: String = ""
-    private var subtitleStableCount: Int = 0
-    private var subtitleCommittedPrefix: String = ""
-    private var subtitleUtteranceSentences: [(en: String, zh: String)] = []
-    private static let subtitleStableThreshold = 2
-    private static let subtitleMaxSamples = 15 * 16000
+    private static let maxRollingBufferSamples = 30 * 16000  // 30 s
 
-    private static let chunkInterval: TimeInterval = 0.5
-    private static let minChunkSamples = 8000        // 0.5s at 16kHz
-
-    // Guards async permission/start callbacks so "stop" cannot be raced by delayed callbacks.
+    // Enable/stop guard — mirrors existing pattern
     private let enableStateLock = NSLock()
     private var subtitleEnabled = false
     private var enableToken: UInt64 = 0
@@ -85,7 +80,7 @@ class MeetingCaptureEngine: NSObject {
 
     private func checkPermissionsAndStart(token: UInt64) {
         SCShareableContent.getExcludingDesktopWindows(false, onScreenWindowsOnly: false) { [weak self] content, error in
-            guard let self = self else { return }
+            guard let self else { return }
             guard self.canProceed(token: token) else { return }
 
             if let error = error {
@@ -131,7 +126,7 @@ class MeetingCaptureEngine: NSObject {
         }
 
         stream.startCapture { [weak self] error in
-            guard let self = self else { return }
+            guard let self else { return }
             guard self.canProceed(token: token) else {
                 stream.stopCapture { _ in }
                 return
@@ -147,7 +142,7 @@ class MeetingCaptureEngine: NSObject {
             logInfo("MeetingCaptureEngine", "Capturing all system audio")
             DispatchQueue.main.async {
                 self.appState?.isTeamsMeetingActive = true
-                self.startSubtitleStreaming()
+                self.startSubtitleStreaming(token: token)
             }
         }
     }
@@ -164,88 +159,131 @@ class MeetingCaptureEngine: NSObject {
     }
 
     private func stopAll() {
-        DispatchQueue.main.async { [weak self] in
-            self?.chunkTimer?.invalidate()
-            self?.chunkTimer = nil
-        }
         stopStream()
         pcmLock.lock()
         pcmBuffer.removeAll()
         pcmLock.unlock()
-    }
-
-    // MARK: - Subtitle Streaming (main thread)
-
-    private func startSubtitleStreaming() {
-        subtitleInFlight = false
-        lastPartialText = ""
-        subtitlePrevText = ""
-        subtitleStableCount = 0
-        subtitleCommittedPrefix = ""
-        subtitleUtteranceSentences = []
-
-        chunkTimer = Timer.scheduledTimer(withTimeInterval: Self.chunkInterval, repeats: true) { [weak self] _ in
-            self?.sendNextChunk()
+        subtitleQueue.async { [weak self] in
+            guard let self else { return }
+            // Flush any pending VAD speech segment before teardown
+            if let vad = self.vadProcessor {
+                let events = vad.flush()
+                for event in events { self.handleVADEvent(event, token: 0) }  // token=0 → canProceed fails
+            }
+            self.vadProcessor = nil
+            self.vadModel = nil
+            self.rollingBuffer.removeAll()
+            self.rollingBufferStart = 0
+            self.speechStartSample = nil
         }
-        logInfo("MeetingCaptureEngine", "Subtitle streaming started (ASRService)")
     }
 
-    private var subtitleModelPath: String {
-        return "mlx-community/Qwen3-ASR-0.6B-8bit"
+    // MARK: - Subtitle Streaming
+
+    private func startSubtitleStreaming(token: UInt64) {
+        // Reset rolling buffer on subtitle queue
+        subtitleQueue.async { [weak self] in
+            guard let self else { return }
+            self.rollingBuffer.removeAll()
+            self.rollingBufferStart = 0
+            self.speechStartSample = nil
+        }
+
+        // Load Silero VAD model asynchronously
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let vad = try await SileroVADModel.fromPretrained()
+                let processor = StreamingVADProcessor(model: vad)
+                self.subtitleQueue.async {
+                    guard self.canProceed(token: token) else { return }
+                    self.vadModel = vad
+                    self.vadProcessor = processor
+                    logInfo("MeetingCaptureEngine", "Silero VAD ready")
+                }
+            } catch {
+                logError("MeetingCaptureEngine", "Failed to load Silero VAD: \(error)")
+            }
+        }
     }
 
-    private func sendNextChunk() {
-        guard !subtitleInFlight else { return }
+    // MARK: - PCM Ingestion (called from subtitleQueue)
+
+    private func drainAndProcess(token: UInt64) {
+        guard let vad = vadProcessor else { return }
 
         pcmLock.lock()
-        guard pcmBuffer.count >= Self.minChunkSamples else {
-            pcmLock.unlock()
-            return
-        }
-        let chunk = Array(pcmBuffer)
-        pcmBuffer.removeAll()
+        guard !pcmBuffer.isEmpty else { pcmLock.unlock(); return }
+        let chunk = pcmBuffer
+        pcmBuffer.removeAll(keepingCapacity: true)
         pcmLock.unlock()
 
-        chunkSeq += 1
-        let url = FileManager.default.temporaryDirectory
-            .appendingPathComponent("typelessmlx_sub_\(chunkSeq).wav")
-        guard writeWAV(samples: chunk, to: url) else { return }
+        // Append to rolling buffer
+        rollingBuffer.append(contentsOf: chunk)
+        if rollingBuffer.count > Self.maxRollingBufferSamples {
+            let excess = rollingBuffer.count - Self.maxRollingBufferSamples
+            rollingBuffer.removeFirst(excess)
+            rollingBufferStart += excess
+            if let s = speechStartSample { speechStartSample = s - excess }
+        }
 
-        subtitleInFlight = true
-        Task { [weak self] in
-            guard let self = self else { return }
-            do {
-                let text = try await ASRService.shared.transcribe(url: url)
-                await MainActor.run { self.processSubtitleASRResult(text) }
-            } catch {
-                logError("MeetingCaptureEngine", "ASR error: \(error.localizedDescription)")
+        // Feed through Silero VAD
+        let events = vad.process(samples: chunk)
+        for event in events { handleVADEvent(event, token: token) }
+    }
+
+    // MARK: - VAD Event Handling (subtitleQueue)
+
+    private func handleVADEvent(_ event: VADEvent, token: UInt64) {
+        switch event {
+        case .speechStarted(let time):
+            let absSample = Int(time * Float(SileroVADModel.sampleRate))
+            speechStartSample = absSample - rollingBufferStart
+            logDebug("MeetingCaptureEngine", "VAD speech start \(String(format: "%.2f", time))s")
+
+        case .speechEnded(let segment):
+            guard let startIdx = speechStartSample else { return }
+            speechStartSample = nil
+
+            let endAbs = Int(segment.endTime * Float(SileroVADModel.sampleRate))
+            let startBuf = max(0, startIdx)
+            let endBuf = min(endAbs - rollingBufferStart, rollingBuffer.count)
+            guard startBuf < endBuf else { return }
+
+            let audio = Array(rollingBuffer[startBuf..<endBuf])
+            logDebug("MeetingCaptureEngine",
+                     "VAD speech end \(String(format: "%.2f", segment.startTime))–\(String(format: "%.2f", segment.endTime))s, \(audio.count) samples")
+
+            Task { [weak self, audio, token] in
+                guard let self, self.canProceed(token: token) else { return }
+                do {
+                    let raw = try await ASRService.shared.transcribe(audio: audio)
+                    guard self.canProceed(token: token) else { return }
+
+                    let text = self.isSilenceHallucination(raw) ? "" : raw
+                    guard !text.isEmpty else { return }
+
+                    let clean = PuncService.shared.restore(text)
+                    await MainActor.run { SubtitleBar.shared.updateLive(clean) }
+
+                    let zh = (try? await LLMService.shared.translate(clean)) ?? ""
+                    guard self.canProceed(token: token) else { return }
+
+                    await MainActor.run {
+                        SubtitleBar.shared.commitSentence(english: clean, chinese: zh)
+                        self.transcriptOverlay?.commitEntry(english: clean, chinese: zh)
+                    }
+                } catch {
+                    logError("MeetingCaptureEngine", "ASR error: \(error)")
+                }
             }
-            try? FileManager.default.removeItem(at: url)
-            await MainActor.run { self.subtitleInFlight = false }
         }
     }
 
-    // MARK: - Subtitle Pipeline Helpers
+    // MARK: - Silence Hallucination Filter
 
-    /// Split punctuated text into (completeSentences, incompleteTail).
-    /// Uses \.(?=\s) — NOT \.(?=\s|$) to avoid false positives from Qwen3-ASR terminal period.
-    private func getCompletedSentences(_ text: String) -> ([String], String) {
-        guard !text.isEmpty else { return ([], "") }
-        var sentences: [String] = []
-        var remaining = text
-        let pattern = try! NSRegularExpression(pattern: "[。！？!?]+|\\.(?=\\s)")
-        var searchRange = remaining.startIndex..<remaining.endIndex
-        while let match = pattern.firstMatch(in: remaining, range: NSRange(searchRange, in: remaining)) {
-            let matchEnd = Range(match.range, in: remaining)!.upperBound
-            let sentence = String(remaining[..<matchEnd]).trimmingCharacters(in: .whitespaces)
-            if !sentence.isEmpty { sentences.append(sentence) }
-            searchRange = matchEnd..<remaining.endIndex
-        }
-        let tail = String(remaining[searchRange]).trimmingCharacters(in: .whitespaces)
-        return (sentences, tail)
-    }
-
-    /// Return true if ASR echoed its own system prompt (silence/noise output).
+    /// Returns true if ASR output verbatim echoes a known system-prompt fragment
+    /// (Qwen3-ASR hallucination on silence/noise).
     private func isSilenceHallucination(_ text: String) -> Bool {
         let known = [
             "请以简体中文输出语音识别结果，加上适当标点符号，不要使用繁体中文。",
@@ -253,124 +291,6 @@ class MeetingCaptureEngine: NSObject {
         ]
         let t = text.trimmingCharacters(in: .whitespaces)
         return known.contains { t == $0 || t.hasPrefix($0) || $0.hasPrefix(t) }
-    }
-
-    // MARK: - Subtitle ASR Result Processing (main thread)
-
-    @MainActor
-    private func processSubtitleASRResult(_ rawText: String) {
-        let text = isSilenceHallucination(rawText) ? "" : rawText
-        logDebug("MeetingCaptureEngine", "Subtitle ASR: \(text.prefix(60))")
-
-        // Find new complete sentences in suffix after committed prefix
-        let suffix: String
-        if !subtitleCommittedPrefix.isEmpty && text.hasPrefix(subtitleCommittedPrefix) {
-            suffix = String(text.dropFirst(subtitleCommittedPrefix.count)).trimmingCharacters(in: .whitespaces)
-        } else {
-            subtitleCommittedPrefix = ""
-            suffix = text
-        }
-
-        let (newSentences, tail) = getCompletedSentences(suffix)
-
-        // Eagerly translate new complete sentences
-        for raw in newSentences {
-            let clean = PuncService.shared.restore(raw)
-            subtitleCommittedPrefix += raw
-            let idx = subtitleUtteranceSentences.count
-            subtitleUtteranceSentences.append((en: clean, zh: ""))
-            SubtitleBar.shared.updateLive(clean)
-            Task { [weak self, clean, idx] in
-                guard let self = self else { return }
-                let zh = (try? await LLMService.shared.translate(clean)) ?? ""
-                await MainActor.run {
-                    if idx < self.subtitleUtteranceSentences.count {
-                        self.subtitleUtteranceSentences[idx].zh = zh
-                    }
-                    SubtitleBar.shared.commitSentence(english: clean, chinese: zh)
-                }
-            }
-        }
-
-        // VAD stability check
-        let forceCommit = pcmBuffer.count >= Self.subtitleMaxSamples
-        if text == subtitlePrevText {
-            subtitleStableCount += 1
-        } else {
-            subtitleStableCount = 0
-            subtitlePrevText = text
-        }
-        let shouldCommit = (subtitleStableCount >= Self.subtitleStableThreshold && !text.isEmpty) || forceCommit
-
-        if shouldCommit {
-            let tailClean = tail.isEmpty ? "" : PuncService.shared.restore(tail)
-            let allSentences = subtitleUtteranceSentences
-            // Reset state
-            subtitlePrevText = ""
-            subtitleStableCount = 0
-            subtitleCommittedPrefix = ""
-            subtitleUtteranceSentences = []
-            lastPartialText = ""
-
-            // Write all utterance sentences to transcript
-            for pair in allSentences {
-                transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
-            }
-            // Translate and commit tail
-            if !tailClean.isEmpty {
-                Task { [weak self, tailClean] in
-                    guard let self = self else { return }
-                    let zh = (try? await LLMService.shared.translate(tailClean)) ?? ""
-                    await MainActor.run {
-                        self.transcriptOverlay?.commitEntry(english: tailClean, chinese: zh)
-                        SubtitleBar.shared.commitSentence(english: tailClean, chinese: zh)
-                    }
-                }
-            }
-        } else {
-            // Show partial tail as live preview
-            if !tail.isEmpty, tail != lastPartialText {
-                lastPartialText = tail
-                SubtitleBar.shared.updateLive(tail)
-            }
-        }
-    }
-
-    // MARK: - WAV Writing
-
-    private func writeWAV(samples: [Float], to url: URL, sampleRate: Int = 16000) -> Bool {
-        let dataSize = samples.count * 2
-        var data = Data(capacity: 44 + dataSize)
-
-        func appendLE<T: FixedWidthInteger>(_ value: T) {
-            var v = value.littleEndian
-            data.append(Data(bytes: &v, count: MemoryLayout<T>.size))
-        }
-
-        data.append(contentsOf: "RIFF".utf8)
-        appendLE(UInt32(36 + dataSize))
-        data.append(contentsOf: "WAVE".utf8)
-        data.append(contentsOf: "fmt ".utf8)
-        appendLE(UInt32(16))
-        appendLE(UInt16(1))           // PCM
-        appendLE(UInt16(1))           // mono
-        appendLE(UInt32(sampleRate))
-        appendLE(UInt32(sampleRate * 2))  // byte rate
-        appendLE(UInt16(2))           // block align
-        appendLE(UInt16(16))          // bits per sample
-        data.append(contentsOf: "data".utf8)
-        appendLE(UInt32(dataSize))
-        for s in samples {
-            appendLE(Int16(max(-32768, min(32767, Int(s * 32767)))))
-        }
-
-        do {
-            try data.write(to: url)
-            return true
-        } catch {
-            logError("MeetingCaptureEngine", "WAV write failed: \(error)")
-            return false
-        }
     }
 
     deinit {}
@@ -386,12 +306,22 @@ extension MeetingCaptureEngine: SCStreamOutput {
         let samples = extractPCM(from: sampleBuffer)
         guard !samples.isEmpty else { return }
 
+        // Accumulate in pcmBuffer (same as before)
         pcmLock.lock()
         pcmBuffer.append(contentsOf: samples)
         if pcmBuffer.count > MeetingCaptureEngine.maxBufferSamples {
             pcmBuffer.removeFirst(pcmBuffer.count - MeetingCaptureEngine.maxBufferSamples)
         }
         pcmLock.unlock()
+
+        // Capture token before dispatching
+        enableStateLock.lock()
+        let token = enableToken
+        let enabled = subtitleEnabled
+        enableStateLock.unlock()
+        guard enabled else { return }
+
+        subtitleQueue.async { [weak self] in self?.drainAndProcess(token: token) }
     }
 
     private func extractPCM(from sampleBuffer: CMSampleBuffer) -> [Float] {
@@ -407,9 +337,9 @@ extension MeetingCaptureEngine: SCStreamOutput {
         var totalLength = 0
         var dataPointer: UnsafeMutablePointer<CChar>?
         guard CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0,
-                                         lengthAtOffsetOut: nil,
-                                         totalLengthOut: &totalLength,
-                                         dataPointerOut: &dataPointer) == kCMBlockBufferNoErr,
+                                          lengthAtOffsetOut: nil,
+                                          totalLengthOut: &totalLength,
+                                          dataPointerOut: &dataPointer) == kCMBlockBufferNoErr,
               let ptr = dataPointer, totalLength > 0 else { return [] }
 
         let floatCount = totalLength / MemoryLayout<Float32>.size
