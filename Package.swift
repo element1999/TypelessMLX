@@ -16,13 +16,15 @@ let package = Package(
         .target(
             name: "TypelessMLXAudioTapSupport",
             path: "TypelessMLX/AudioSupport",
+            swiftSettings: [.swiftLanguageMode(.v5)],
             linkerSettings: [
                 .linkedFramework("AVFoundation")
             ]
         ),
         .target(
             name: "TypelessMLXAudioInputSupport",
-            path: "TypelessMLX/AudioInputSupport"
+            path: "TypelessMLX/AudioInputSupport",
+            swiftSettings: [.swiftLanguageMode(.v5)]
         ),
         .executableTarget(
             name: "TypelessMLX",

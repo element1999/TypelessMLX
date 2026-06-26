@@ -101,7 +101,7 @@ class OCRManager: NSObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 do {
-                    // Capture the full display via SCScreenshotManager (CGDisplayCreateImage removed in macOS 15)
+                    // Capture the full display via SCScreenshotManager (CGWindowListCreateImage removed in macOS 15)
                     let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
                     guard let display = content.displays.first(where: { $0.displayID == displayID })
                             ?? content.displays.first else {
