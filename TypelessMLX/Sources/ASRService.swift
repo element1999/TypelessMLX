@@ -66,9 +66,12 @@ actor ASRService {
     }
 
     private func storeModel(_ m: Qwen3ASRModel, path: String) {
+        guard currentModelPath == path else {
+            logDebug("ASRService", "Discarding stale model load for \(path.split(separator: "/").last ?? Substring(path))")
+            return
+        }
         model = m
         loadTask = nil
-        currentModelPath = path
         logInfo("ASRService", "Qwen3ASR model ready: \(path.split(separator: "/").last ?? Substring(path))")
     }
 
@@ -99,18 +102,24 @@ actor ASRService {
     private func loadAudio(from url: URL) throws -> (samples: [Float], sampleRate: Int) {
         let file = try AVAudioFile(forReading: url)
         let srcFormat = file.processingFormat
-        let targetFormat = AVAudioFormat(
+        guard let targetFormat = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
             sampleRate: srcFormat.sampleRate,
             channels: 1,
             interleaved: false
-        )!
+        ) else {
+            throw NSError(domain: "ASRService", code: -11,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create target audio format"])
+        }
 
         let frameCount = AVAudioFrameCount(file.length)
         guard frameCount > 0 else { return ([], Int(srcFormat.sampleRate)) }
 
         if srcFormat.channelCount == 1 && srcFormat.commonFormat == .pcmFormatFloat32 {
-            let buf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount)!
+            guard let buf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
+                throw NSError(domain: "ASRService", code: -12,
+                              userInfo: [NSLocalizedDescriptionKey: "Cannot create audio buffer"])
+            }
             try file.read(into: buf)
             let count = Int(buf.frameLength)
             let ptr = buf.floatChannelData![0]
@@ -118,7 +127,10 @@ actor ASRService {
         }
 
         // Convert format (stereo → mono, int16 → float32, etc.)
-        let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount)!
+        guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
+            throw NSError(domain: "ASRService", code: -13,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create audio buffer"])
+        }
         try file.read(into: srcBuf)
 
         guard let converter = AVAudioConverter(from: srcFormat, to: targetFormat) else {
@@ -128,7 +140,10 @@ actor ASRService {
         let outCount = AVAudioFrameCount(
             Double(srcBuf.frameLength) * targetFormat.sampleRate / srcFormat.sampleRate
         ) + 1
-        let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCount)!
+        guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCount) else {
+            throw NSError(domain: "ASRService", code: -14,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create audio buffer"])
+        }
         var convError: NSError?
         var didProvide = false
         converter.convert(to: outBuf, error: &convError) { _, outStatus in
