@@ -118,6 +118,23 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BINARY_SRC" "$APP_BUNDLE/Contents/MacOS/TypelessMLX"
 cp "TypelessMLX/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
+TOKENIZER_RESOURCES="$PROJECT_DIR/TypelessMLX/Resources/whisper-tokenizers"
+if [ -d "$TOKENIZER_RESOURCES" ]; then
+    mkdir -p "$APP_BUNDLE/Contents/Resources/whisper-tokenizers"
+    cp -R "$TOKENIZER_RESOURCES/." "$APP_BUNDLE/Contents/Resources/whisper-tokenizers/"
+    if [ ! -s "$APP_BUNDLE/Contents/Resources/whisper-tokenizers/models/openai/whisper-small/tokenizer.json" ] || \
+       [ ! -s "$APP_BUNDLE/Contents/Resources/whisper-tokenizers/models/openai/whisper-small/tokenizer_config.json" ] || \
+       [ ! -s "$APP_BUNDLE/Contents/Resources/whisper-tokenizers/models/openai/whisper-large-v3/tokenizer.json" ] || \
+       [ ! -s "$APP_BUNDLE/Contents/Resources/whisper-tokenizers/models/openai/whisper-large-v3/tokenizer_config.json" ]; then
+        echo "⚠️  Whisper tokenizer resources are missing. Run scripts/download-whisper-tokenizers.sh before packaging."
+        if [ "$MODE" = "release" ]; then
+            exit 1
+        fi
+    else
+        echo "  ✅ Whisper tokenizer resources copied"
+    fi
+fi
+
 if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     echo "  ✅ App icon copied"
@@ -216,10 +233,67 @@ INSTALL_EOF
         echo "  ✅ $(basename "$archive") ($size)"
     }
 
+    package_model_subdir_archive() {
+        local model_id="$1" repo="$2" subdir="$3"
+        local escaped_repo
+        escaped_repo=$(echo "$repo" | sed 's|/|--|g')
+        local cache_dir="$HF_CACHE/models--$escaped_repo"
+        local snapshot_dir
+        snapshot_dir=$(ls -td "$cache_dir/snapshots"/*/ 2>/dev/null | head -1)
+        if [ -z "$snapshot_dir" ] || [ ! -d "$snapshot_dir/$subdir" ]; then
+            echo "  ⚠️  跳过 $model_id（本地未缓存：$subdir）"
+            return 0
+        fi
+
+        local snapshot_hash
+        snapshot_hash=$(basename "${snapshot_dir%/}")
+        local staging="$BUILD_DIR/${model_id}-staging"
+        local archive="$BUILD_DIR/${model_id}-model.zip"
+
+        rm -rf "$staging"
+        mkdir -p "$staging/model"
+
+        echo "  复制 $model_id 模型文件 ($subdir)..."
+        (cd "${snapshot_dir%/}" && cp -RL "$subdir" "$staging/model/")
+
+        local escaped_repo_val="$escaped_repo"
+        local snapshot_hash_val="$snapshot_hash"
+        local model_id_val="$model_id"
+
+        cat > "$staging/install.sh" << INSTALL_EOF
+#!/bin/bash
+set -e
+SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
+SNAPSHOT_HASH="${snapshot_hash_val}"
+CACHE_DIR="\$HOME/.cache/huggingface/hub/models--${escaped_repo_val}"
+SNAPSHOT_DIR="\$CACHE_DIR/snapshots/\$SNAPSHOT_HASH"
+
+echo "📦 正在安装模型: ${model_id_val}..."
+mkdir -p "\$SNAPSHOT_DIR"
+mkdir -p "\$CACHE_DIR/refs"
+echo "  复制模型文件..."
+cp -r "\$SCRIPT_DIR/model/." "\$SNAPSHOT_DIR/"
+printf '%s' "\$SNAPSHOT_HASH" > "\$CACHE_DIR/refs/main"
+echo "✅ 安装完成: \$SNAPSHOT_DIR"
+echo "   重启 TypelessMLX 后，在设置中选择对应模型即可使用。"
+INSTALL_EOF
+
+        chmod +x "$staging/install.sh"
+        echo "  压缩打包中..."
+        (cd "$staging" && zip -r "$archive" . -x "*.DS_Store" > /dev/null)
+        rm -rf "$staging"
+
+        local size
+        size=$(du -sh "$archive" | awk '{print $1}')
+        echo "  ✅ $(basename "$archive") ($size)"
+    }
+
     package_model_archive "qwen3-asr-0.6b"  "mlx-community/Qwen3-ASR-0.6B-8bit"
     package_model_archive "qwen3-asr-1.7b"  "mlx-community/Qwen3-ASR-1.7B-8bit"
     package_model_archive "qwen2.5-1.5b-translate" "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
-    package_model_archive "whisper-large-v3" "mlx-community/whisper-large-v3-mlx"
+    package_model_subdir_archive "whisper-large-v3-947m" "argmaxinc/whisperkit-coreml" "openai_whisper-large-v3_947MB"
+    package_model_subdir_archive "whisper-large-v3-turbo-632m" "argmaxinc/whisperkit-coreml" "openai_whisper-large-v3-v20240930_turbo_632MB"
+    package_model_subdir_archive "whisper-small-216m" "argmaxinc/whisperkit-coreml" "openai_whisper-small_216MB"
     fi  # SKIP_MODELS
 fi
 

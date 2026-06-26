@@ -61,12 +61,14 @@ class ModelManager: ObservableObject {
 
         downloadTask = Task { [weak self] in
             guard let self = self else { return }
-            let success: Bool
+            var success = false
             do {
                 let repo = try Self.repoID(from: model.repoOrPath)
                 let client = Self.hubClient()
+                let matching = Self.matchingGlobs(for: model)
                 _ = try await client.downloadSnapshot(
                     of: repo,
+                    matching: matching,
                     maxConcurrentDownloads: 4
                 ) { [weak self] progress in
                     self?.downloadStatusText = Self.progressText(progress)
@@ -74,8 +76,12 @@ class ModelManager: ObservableObject {
                 success = true
             } catch {
                 if Task.isCancelled { return }
-                success = false
-                logError("ModelManager", "Download error: \(error)")
+                if self.hasCachedWhisperKitCoreMLModel(model) {
+                    success = true
+                    logWarn("ModelManager", "Download returned an error, but required WhisperKit CoreML files are present; treating as cached: \(model.id). Error: \(error)")
+                } else {
+                    logError("ModelManager", "Download error: \(error)")
+                }
             }
 
             logInfo("ModelManager", "Download \(success ? "succeeded" : "failed") for \(model.id)")
@@ -131,6 +137,13 @@ class ModelManager: ObservableObject {
         return HubClient(host: host, userAgent: "TypelessMLX", cache: cache)
     }
 
+    private static func matchingGlobs(for model: MLXModel) -> [String] {
+        guard model.modelType == "whisper", let variant = AppState.whisperKitVariant(for: model.id) else {
+            return []
+        }
+        return WhisperService.requiredWhisperKitDownloadFiles(for: variant).map { "\(variant)/\($0)" }
+    }
+
     private static func progressText(_ progress: Progress) -> String {
         let completed = progress.completedUnitCount
         let total = progress.totalUnitCount
@@ -157,11 +170,42 @@ class ModelManager: ObservableObject {
             .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)")
     }
 
+    private func cachedWhisperKitModelFolder(for model: MLXModel) -> URL? {
+        guard model.modelType == "whisper",
+              let variant = AppState.whisperKitVariant(for: model.id),
+              let dir = cacheDirectory(for: model) else { return nil }
+        let snapshots = dir.appendingPathComponent("snapshots")
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { return nil }
+
+        return names
+            .map { snapshots.appendingPathComponent($0).appendingPathComponent(variant) }
+            .filter { WhisperService.hasWhisperKitCoreMLFiles(in: $0) }
+            .max { lhs, rhs in
+                let lDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lDate < rDate
+            }
+    }
+
+    private func hasCachedWhisperKitCoreMLModel(_ model: MLXModel) -> Bool {
+        cachedWhisperKitModelFolder(for: model) != nil
+    }
+
     private func diskSize(for model: MLXModel) -> Int64 {
         guard let dir = cacheDirectory(for: model) else { return 0 }
         if model.isLocal {
             guard FileManager.default.fileExists(atPath: dir.path) else { return 0 }
             return directorySize(dir)
+        }
+        if model.modelType == "whisper", let variant = AppState.whisperKitVariant(for: model.id) {
+            let snapshots = dir.appendingPathComponent("snapshots")
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { return 0 }
+            let size = names.reduce(Int64(0)) { total, name in
+                let variantDir = snapshots.appendingPathComponent(name).appendingPathComponent(variant)
+                guard FileManager.default.fileExists(atPath: variantDir.path) else { return total }
+                return max(total, directorySize(variantDir))
+            }
+            return size > 1024 ? size : 0
         }
         // HF Hub stores actual files in blobs/ (snapshots/ only has symlinks)
         let blobs = dir.appendingPathComponent("blobs")
@@ -178,9 +222,19 @@ class ModelManager: ObservableObject {
         ) else { return 0 }
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            total += Int64(size)
+            total += fileSizeFollowingSymlink(fileURL)
         }
         return total
+    }
+
+    private func fileSizeFollowingSymlink(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
+        if values?.isSymbolicLink == true,
+           let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) {
+            let resolved = URL(fileURLWithPath: destination, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+            let size = (try? resolved.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return Int64(size)
+        }
+        return Int64(values?.fileSize ?? 0)
     }
 }

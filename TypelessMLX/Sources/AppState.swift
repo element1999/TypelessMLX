@@ -98,21 +98,21 @@ class AppState: ObservableObject {
             isLocal: false, modelType: "qwen3"
         ),
         MLXModel(
-            id: "whisper-large-v3",
-            repoOrPath: "mlx-community/whisper-large-v3-mlx",
-            description: "Whisper Large v3（多语言，3.1GB，最高精度）",
+            id: "whisper-large-v3-947m",
+            repoOrPath: "argmaxinc/whisperkit-coreml",
+            description: "WhisperKit Large v3 947M（多语言，最高精度）",
             isLocal: false, modelType: "whisper"
         ),
         MLXModel(
-            id: "whisper-medium",
-            repoOrPath: "mlx-community/whisper-medium-mlx",
-            description: "Whisper Medium（多语言，1.5GB）",
+            id: "whisper-large-v3-turbo-632m",
+            repoOrPath: "argmaxinc/whisperkit-coreml",
+            description: "WhisperKit Large v3 Turbo 632M（多语言，速度/体积平衡）",
             isLocal: false, modelType: "whisper"
         ),
         MLXModel(
-            id: "whisper-small",
-            repoOrPath: "mlx-community/whisper-small-mlx",
-            description: "Whisper Small（465MB，最快）",
+            id: "whisper-small-216m",
+            repoOrPath: "argmaxinc/whisperkit-coreml",
+            description: "WhisperKit Small 216M（多语言，最快）",
             isLocal: false, modelType: "whisper"
         ),
     ]
@@ -136,6 +136,23 @@ class AppState: ObservableObject {
         return FileManager.default.fileExists(atPath: path) ? path : nil
     }
 
+    static func whisperKitVariant(for modelID: String) -> String? {
+        switch modelID {
+        case "whisper-large-v3-947m": return "openai_whisper-large-v3_947MB"
+        case "whisper-large-v3-turbo-632m": return "openai_whisper-large-v3-v20240930_turbo_632MB"
+        case "whisper-small-216m": return "openai_whisper-small_216MB"
+        default: return nil
+        }
+    }
+
+    static func whisperKitTokenizerResourceSubpath(for modelID: String) -> String? {
+        switch modelID {
+        case "whisper-large-v3-947m", "whisper-large-v3-turbo-632m": return "models/openai/whisper-large-v3"
+        case "whisper-small-216m": return "models/openai/whisper-small"
+        default: return nil
+        }
+    }
+
     /// Resolved model path for meeting subtitle — always a Whisper model
     var resolvedSubtitleModelPath: String {
         if selectedModel.modelType == "whisper" { return resolvedModelPath }
@@ -143,7 +160,7 @@ class AppState: ObservableObject {
         for m in whisperModels {
             if let bundled = Self.bundledModelPath(for: m) { return bundled }
         }
-        return "mlx-community/whisper-large-v3-mlx"
+        return "argmaxinc/whisperkit-coreml"
     }
     /// Text model for lookup / translation.
     var resolvedTextModelPath: String {
@@ -151,6 +168,16 @@ class AppState: ObservableObject {
     }
 
     private func normalizeHotkeyDefaults() {
+        switch selectedModelID {
+        case "whisper-large-v3": selectedModelID = "whisper-large-v3-947m"
+        case "whisper-medium": selectedModelID = "whisper-large-v3-turbo-632m"
+        case "whisper-small": selectedModelID = "whisper-small-216m"
+        default: break
+        }
+        if !Self.availableModels.contains(where: { $0.id == selectedModelID }) {
+            selectedModelID = "macos-speech"
+        }
+
         let defaultModifiers = 6144  // controlKey | optionKey
 
         func isInvalidHotkey(_ keyCode: Int, _ modifiers: Int) -> Bool {

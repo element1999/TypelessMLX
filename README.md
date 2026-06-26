@@ -39,7 +39,9 @@
 | macOS 内置 | 无需下载 | 最快 |
 | Qwen3-ASR 0.6B | ~1 GB | 中文最佳，**推荐** |
 | Qwen3-ASR 1.7B | ~2 GB | 更高精度 |
-| Whisper Large v3 | ~3 GB | 多语言，最高精度 |
+| WhisperKit Large v3 | 947 MB | 多语言，最高精度 |
+| WhisperKit Large v3 Turbo | 632 MB | 多语言，速度/体积平衡 |
+| WhisperKit Small | 216 MB | 多语言，最快 |
 
 实时字幕固定使用 Qwen3-ASR 0.6B（速度优先）。
 
@@ -62,8 +64,9 @@ bash install.sh
 **推荐安装组合：**
 - `qwen3-asr-0.6b-model.zip` — 语音输入 + 实时字幕
 - `qwen2.5-1.5b-translate-model.zip` — 查词 / 句子翻译
+- `whisper-large-v3-turbo-632m-model.zip` — WhisperKit 多语言备用模型
 
-如果不预装模型，首次使用时 App 会自动下载（通过 hf-mirror.com）。
+如果不预装模型，首次使用时 App 会自动下载模型权重（通过 hf-mirror.com）。WhisperKit tokenizer 已随 App 内置，不会在用户下载 WhisperKit 模型时额外访问 OpenAI tokenizer repo。
 
 ### 3. 首次启动
 1. 打开 TypelessMLX，菜单栏出现图标
@@ -93,6 +96,9 @@ bash install.sh
 ```bash
 # 调试构建
 swift build
+
+# 下载并内置 WhisperKit tokenizer（release 前执行一次）
+./scripts/download-whisper-tokenizers.sh
 
 # Release 打包（含模型 zip）
 ./build-app.sh --release --allow-adhoc
