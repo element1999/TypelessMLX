@@ -68,6 +68,7 @@ class AppState: ObservableObject {
     @AppStorage("enableTextRefinement") var enableTextRefinement: Bool = false
     @AppStorage("removeFillers") var removeFillers: Bool = false
     @AppStorage("meetingSubtitleEnabled") var meetingSubtitleEnabled: Bool = false
+    @AppStorage("keepBackendAlive") var keepBackendAlive: Bool = true
     @AppStorage("lookupHotkeyKeyCode") var lookupHotkeyKeyCode: Int = 2        // kVK_ANSI_D
     @AppStorage("lookupHotkeyModifiers") var lookupHotkeyModifiers: Int = 6144  // controlKey | optionKey
     @AppStorage("translateHotkeyKeyCode") var translateHotkeyKeyCode: Int = 17  // kVK_ANSI_T

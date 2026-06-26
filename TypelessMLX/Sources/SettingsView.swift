@@ -88,6 +88,7 @@ struct GeneralSettingsTab: View {
                     .onChange(of: appState.launchAtLogin) { newValue in
                         setLaunchAtLogin(newValue)
                     }
+                Toggle("Python 后端常驻（不因空闲自动停止）", isOn: $appState.keepBackendAlive)
             }
 
             Section("权限状态") {

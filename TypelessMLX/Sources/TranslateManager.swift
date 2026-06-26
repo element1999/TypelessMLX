@@ -5,6 +5,7 @@ class TranslateManager {
     static let shared = TranslateManager()
     private var overlay: TranslateOverlay?
     private weak var appState: AppState?
+    private let autoRetryDelay: TimeInterval = 0.8
 
     private init() {}
 
@@ -38,12 +39,42 @@ class TranslateManager {
             ov.show(direction: direction, near: pt)
         }
 
-        guard appState?.hasPythonBackend == true else { return }
-        WhisperBridge.shared.translate(text: trimmed,
+        performTranslate(text: trimmed, retryOnNotReady: true)
+    }
+
+    private func performTranslate(text: String, retryOnNotReady: Bool) {
+        WhisperBridge.shared.translate(text: text,
                                        textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
-            let translation = (try? result.get()) ?? ""
-            logInfo("TranslateManager", "translation: \(translation.prefix(60))")
-            DispatchQueue.main.async { self?.overlay?.setContent(translation) }
+            switch result {
+            case .success(let translation):
+                logInfo("TranslateManager", "translation: \(translation.prefix(60))")
+                DispatchQueue.main.async { self?.overlay?.setContent(translation) }
+            case .failure(let error):
+                let message = error.localizedDescription
+                logWarn("TranslateManager", "translate failed: \(message)")
+                if retryOnNotReady, message.localizedCaseInsensitiveContains("not ready") {
+                    DispatchQueue.main.async {
+                        self?.overlay?.setContent("后端启动中，正在重试…")
+                    }
+                    WhisperBridge.shared.start { [weak self] success in
+                        DispatchQueue.main.async {
+                            AppState.shared.hasPythonBackend = success
+                            AppState.shared.updatePermissionState()
+                            guard success else {
+                                self?.overlay?.setContent("后端未就绪，请稍后重试")
+                                return
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + (self?.autoRetryDelay ?? 0.8)) {
+                                self?.performTranslate(text: text, retryOnNotReady: false)
+                            }
+                        }
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        self?.overlay?.setContent("翻译失败：\(message)")
+                    }
+                }
+            }
         }
     }
 

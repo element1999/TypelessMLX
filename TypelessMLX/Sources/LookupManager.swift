@@ -6,6 +6,7 @@ class LookupManager {
     static let shared = LookupManager()
     private var overlay: LookupOverlay?
     private weak var appState: AppState?
+    private let autoRetryDelay: TimeInterval = 0.8
 
     private init() {}
 
@@ -70,15 +71,42 @@ class LookupManager {
             ov.show(word: word, near: pt)
         }
 
-        guard appState?.hasPythonBackend == true else {
-            logInfo("LookupManager", "Python backend not ready, overlay shows 查询中… only")
-            return
-        }
+        performLookup(word: word, retryOnNotReady: true)
+    }
+
+    private func performLookup(word: String, retryOnNotReady: Bool) {
         WhisperBridge.shared.lookup(text: word,
                                     textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
-            let entry = (try? result.get()) ?? ""
-            logInfo("LookupManager", "lookup result: \(entry.prefix(60))")
-            DispatchQueue.main.async { self?.overlay?.setContent(entry) }
+            switch result {
+            case .success(let entry):
+                logInfo("LookupManager", "lookup result: \(entry.prefix(60))")
+                DispatchQueue.main.async { self?.overlay?.setContent(entry) }
+            case .failure(let error):
+                let message = error.localizedDescription
+                logWarn("LookupManager", "lookup failed: \(message)")
+                if retryOnNotReady, message.localizedCaseInsensitiveContains("not ready") {
+                    DispatchQueue.main.async {
+                        self?.overlay?.setContent("后端启动中，正在重试…")
+                    }
+                    WhisperBridge.shared.start { [weak self] success in
+                        DispatchQueue.main.async {
+                            AppState.shared.hasPythonBackend = success
+                            AppState.shared.updatePermissionState()
+                            guard success else {
+                                self?.overlay?.setContent("后端未就绪，请稍后重试")
+                                return
+                            }
+                            DispatchQueue.main.asyncAfter(deadline: .now() + (self?.autoRetryDelay ?? 0.8)) {
+                                self?.performLookup(word: word, retryOnNotReady: false)
+                            }
+                        }
+                    }
+                } else {
+                    DispatchQueue.main.async {
+                        self?.overlay?.setContent("查询失败：\(message)")
+                    }
+                }
+            }
         }
     }
 

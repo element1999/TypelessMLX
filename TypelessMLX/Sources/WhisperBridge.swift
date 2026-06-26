@@ -11,6 +11,8 @@ class WhisperBridge {
     private var stdoutPipe: Pipe?
     private var stderrPipe: Pipe?
     private var isReady = false
+    private var isStarting = false
+    private var startCompletions: [(Bool) -> Void] = []
     private struct RequestContext {
         let completion: (Result<String, Error>) -> Void
         let startTime: Date
@@ -71,12 +73,38 @@ class WhisperBridge {
     // MARK: - Lifecycle
 
     func start(completion: @escaping (Bool) -> Void) {
+        lock.lock()
+        if isReady {
+            lock.unlock()
+            DispatchQueue.main.async { completion(true) }
+            return
+        }
+        startCompletions.append(completion)
+        if isStarting {
+            lock.unlock()
+            return
+        }
+        isStarting = true
+        lock.unlock()
+
         DispatchQueue.global(qos: .userInitiated).async {
-            self.startProcess(completion: completion)
+            self.startProcess()
         }
     }
 
-    private func startProcess(completion: @escaping (Bool) -> Void) {
+    private func finishStart(_ success: Bool) {
+        lock.lock()
+        isStarting = false
+        let completions = startCompletions
+        startCompletions.removeAll()
+        lock.unlock()
+
+        DispatchQueue.main.async {
+            completions.forEach { $0(success) }
+        }
+    }
+
+    private func startProcess() {
         stopProcess()
 
         let python = self.pythonPath
@@ -84,7 +112,7 @@ class WhisperBridge {
 
         guard FileManager.default.fileExists(atPath: script) else {
             logError("WhisperBridge", "Script not found: \(script)")
-            completion(false)
+            finishStart(false)
             return
         }
 
@@ -103,16 +131,16 @@ class WhisperBridge {
         process.standardOutput = stdoutPipe
         process.standardError = stderrPipe
 
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] terminated in
             logWarn("WhisperBridge", "Python process terminated (exit: \(process.terminationStatus))")
-            self?.handleProcessTermination()
+            self?.handleProcessTermination(terminated)
         }
 
         do {
             try process.run()
         } catch {
             logError("WhisperBridge", "Failed to start Python: \(error)")
-            DispatchQueue.main.async { completion(false) }
+            finishStart(false)
             return
         }
 
@@ -152,7 +180,7 @@ class WhisperBridge {
         guard readyReceived else {
             logError("WhisperBridge", "Python did not send ready signal within 60s")
             process.terminate()
-            DispatchQueue.main.async { completion(false) }
+            finishStart(false)
             return
         }
 
@@ -175,16 +203,27 @@ class WhisperBridge {
         }
 
         logInfo("WhisperBridge", "Python backend ready ✅")
-        DispatchQueue.main.async { completion(true) }
+        finishStart(true)
     }
 
-    private func handleProcessTermination() {
+    private func handleProcessTermination(_ terminated: Process) {
         lock.lock()
+        // Ignore stale termination callbacks from an old process instance.
+        guard self.process === terminated else {
+            lock.unlock()
+            logDebug("WhisperBridge", "Ignoring stale process termination callback")
+            return
+        }
         isReady = false
         process = nil
         let pending = pendingRequests
         pendingRequests.removeAll()
         lock.unlock()
+
+        DispatchQueue.main.async {
+            AppState.shared.hasPythonBackend = false
+            AppState.shared.updatePermissionState()
+        }
 
         let error = NSError(domain: "WhisperBridge", code: -1,
                             userInfo: [NSLocalizedDescriptionKey: "Python process terminated unexpectedly"])
@@ -608,6 +647,7 @@ class WhisperBridge {
     // MARK: - Idle Timer
 
     private func resetIdleTimer() {
+        guard !AppState.shared.keepBackendAlive else { return }
         idleTimer?.invalidate()
         DispatchQueue.main.async { [weak self] in
             self?.idleTimer = Timer.scheduledTimer(withTimeInterval: 15 * 60, repeats: false) { [weak self] _ in

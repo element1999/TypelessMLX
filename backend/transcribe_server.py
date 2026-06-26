@@ -31,6 +31,24 @@ def ensure_trailing_punctuation(text: str) -> str:
         return text + '。'
     return text
 
+
+def _ensure_tokenizer_json(model_path: str) -> None:
+    """Generate tokenizer.json if missing — required by mlx_audio for some Qwen3-ASR checkpoints."""
+    tokenizer_path = os.path.join(model_path, "tokenizer.json")
+    if os.path.exists(tokenizer_path):
+        return
+    sys.stderr.write(f"[TypelessMLX] tokenizer.json missing in {os.path.basename(model_path)}, generating…\n")
+    sys.stderr.flush()
+    try:
+        from transformers import AutoTokenizer
+        tok = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        tok.backend_tokenizer.save(tokenizer_path)
+        sys.stderr.write("[TypelessMLX] tokenizer.json generated OK\n")
+        sys.stderr.flush()
+    except Exception as exc:
+        sys.stderr.write(f"[TypelessMLX] Warning: could not generate tokenizer.json: {exc}\n")
+        sys.stderr.flush()
+
 # Default model: fallback to HF repo
 DEFAULT_MODEL = os.path.expanduser("~/.local/share/typelessmlx/models/whisper-large-v3-mlx")
 FALLBACK_MODEL = "mlx-community/whisper-large-v3-mlx"
@@ -93,7 +111,8 @@ _subtitle_qwen3_model = None
 _subtitle_qwen3_model_path: str | None = None
 _subtitle_committed_prefix: str = ""  # eagerly-translated prefix of current utterance
 _subtitle_utterance_sentences: list = []  # all eager sentences for current utterance
-_SUBTITLE_STABLE_THRESHOLD = 2       # consecutive identical results → commit utterance
+_subtitle_eager_sent: set = set()        # sentence texts already sent as eager (dedup across prefix resets)
+_SUBTITLE_STABLE_THRESHOLD = 1       # consecutive identical results → commit utterance
 _SUBTITLE_MAX_SAMPLES = 15 * 16000   # 15s max accumulation before force-commit
 _SUBTITLE_MIN_SAMPLES = 8000         # 0.5s minimum before running ASR
 
@@ -278,6 +297,7 @@ def transcribe_qwen3(audio_path: str, model_path: str, language: str | None,
     if _qwen3_model is None or _qwen3_model_path != model_path:
         sys.stderr.write(f"[TypelessMLX] Loading Qwen3-ASR model: {os.path.basename(model_path)}\n")
         sys.stderr.flush()
+        _ensure_tokenizer_json(model_path)
         _qwen3_model = load_model(model_path)
         _qwen3_model_path = model_path
     import tempfile
@@ -501,6 +521,7 @@ def _transcribe_qwen3_subtitle(audio_path: str, model_path: str,
     if _subtitle_qwen3_model is None or _subtitle_qwen3_model_path != model_path:
         sys.stderr.write(f"[TypelessMLX] Loading subtitle ASR: {model_path}\n")
         sys.stderr.flush()
+        _ensure_tokenizer_json(model_path)
         _subtitle_qwen3_model = load_model(model_path)
         _subtitle_qwen3_model_path = model_path
     import tempfile
@@ -530,7 +551,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
     """Accumulate audio chunks; eagerly translate completed sentences in partials,
     commit remaining tail on VAD-detected silence."""
     global _subtitle_prev_text, _subtitle_stable_count, _subtitle_committed_prefix
-    global _subtitle_utterance_sentences
+    global _subtitle_utterance_sentences, _subtitle_eager_sent
     import numpy as np
     import tempfile
 
@@ -541,6 +562,7 @@ def handle_subtitle_stream(req_id: str, req: dict):
         _subtitle_stable_count = 0
         _subtitle_committed_prefix = ""
         _subtitle_utterance_sentences = []
+        _subtitle_eager_sent = set()
         send({"id": req_id, "text": "", "committed": False})
         return
 
@@ -583,8 +605,10 @@ def handle_subtitle_stream(req_id: str, req: dict):
     if text.startswith(_subtitle_committed_prefix):
         suffix = text[len(_subtitle_committed_prefix):]
     else:
-        # ASR corrected earlier text — reset prefix, re-scan from scratch
+        # ASR corrected earlier text — reset prefix and utterance accumulator, re-scan from scratch
         _subtitle_committed_prefix = ""
+        _subtitle_utterance_sentences = []
+        _subtitle_eager_sent = set()
         suffix = text
 
     new_sentences, tail = _get_completed_sentences(punc_restore(suffix) if suffix.strip() else suffix)
@@ -592,11 +616,13 @@ def handle_subtitle_stream(req_id: str, req: dict):
     eager_pairs: list[dict] = []
     for s in new_sentences:
         zh = translate_to_chinese_llm(s) if _llm_translator_ready else ""
-        eager_pairs.append({"en": s, "zh": zh})
         _subtitle_committed_prefix += s
         _subtitle_utterance_sentences.append({"en": s, "zh": zh})
-        sys.stderr.write(f"[TypelessMLX] Eager sentence: {repr(s[:50])}\n")
-        sys.stderr.flush()
+        if s not in _subtitle_eager_sent:
+            eager_pairs.append({"en": s, "zh": zh})
+            _subtitle_eager_sent.add(s)
+            sys.stderr.write(f"[TypelessMLX] Eager sentence: {repr(s[:50])}\n")
+            sys.stderr.flush()
 
     # VAD stability check
     force_commit = total_samples >= _SUBTITLE_MAX_SAMPLES
@@ -609,22 +635,19 @@ def handle_subtitle_stream(req_id: str, req: dict):
         commit = force_commit
 
     if commit:
-        # For transcript: use the FULL stable ASR text — punc_restore + split + translate fresh.
-        # This gives clean, context-aware output with no duplicates from prefix tracking.
-        full_punct = punc_restore(text) if text.strip() else ""
-        transcript_sents, transcript_tail = _get_completed_sentences(full_punct)
-        if transcript_tail.strip():
-            transcript_sents.append(transcript_tail.strip())
-        utterance_pairs = []
-        for s in transcript_sents:
-            zh = translate_to_chinese_llm(s) if _llm_translator_ready else ""
-            utterance_pairs.append({"en": s, "zh": zh})
+        # Reuse already-translated eager sentences; only translate the tail (incomplete sentence).
+        utterance_pairs = list(_subtitle_utterance_sentences)
+        if tail.strip():
+            tail_punct = punc_restore(tail)
+            zh = translate_to_chinese_llm(tail_punct) if _llm_translator_ready else ""
+            utterance_pairs.append({"en": tail_punct, "zh": zh})
 
         _subtitle_buffer.clear()
         _subtitle_prev_text = ""
         _subtitle_stable_count = 0
         _subtitle_committed_prefix = ""
         _subtitle_utterance_sentences = []
+        _subtitle_eager_sent = set()
         sys.stderr.write(f"[TypelessMLX] Subtitle commit: {len(utterance_pairs)} transcript sents, {len(eager_pairs)} new eager\n")
         sys.stderr.flush()
         send({"id": req_id, "text": "", "committed": True, "chinese": "",

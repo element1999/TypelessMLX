@@ -83,27 +83,13 @@ class SetupViewModel: ObservableObject {
             // Step 1: Create Python venv
             if !WhisperBridge.isVenvReady() {
                 DispatchQueue.main.async { self.venvStatus = .running }
-                let installed: Bool
-                if let bundledVenv = Bundle.main.path(forResource: "venv", ofType: nil) {
-                    self.appendLog("📦 从应用包复制 Python 虚拟环境...")
-                    installed = self.installBundledVenv(bundledVenv)
-                    if installed {
-                        self.appendLog("✅ Python 虚拟环境安装完成")
-                    } else {
-                        self.appendLog("❌ 复制虚拟环境失败")
-                    }
-                } else {
-                    self.appendLog("🔧 创建 Python 虚拟环境...")
-                    installed = self.createVenv()
-                    if installed {
-                        self.appendLog("✅ Python 虚拟环境创建完成")
-                    } else {
-                        self.appendLog("❌ Python 虚拟环境创建失败，请确认已安装 uv")
-                    }
-                }
+                self.appendLog("🔧 创建 Python 虚拟环境...")
+                let installed = self.createVenv()
                 if installed {
+                    self.appendLog("✅ Python 虚拟环境创建完成")
                     DispatchQueue.main.async { self.venvStatus = .done }
                 } else {
+                    self.appendLog("❌ Python 虚拟环境创建失败，请确认已安装 uv")
                     DispatchQueue.main.async { self.venvStatus = .failed("安装失败") }
                     DispatchQueue.main.async { self.isRunning = false }
                     return
@@ -132,112 +118,37 @@ class SetupViewModel: ObservableObject {
         }
     }
 
-    private func installBundledVenv(_ bundledVenvPath: String) -> Bool {
-        let dest = NSHomeDirectory() + "/.local/share/typelessmlx/venv"
-        let fm = FileManager.default
-        let destParent = (dest as NSString).deletingLastPathComponent
-        do {
-            try fm.createDirectory(atPath: destParent, withIntermediateDirectories: true)
-        } catch {
-            appendLog("   ❌ 无法创建目录: \(error.localizedDescription)")
-            return false
-        }
-        // Remove existing venv — try FileManager first, fall back to rm -rf
-        if fm.fileExists(atPath: dest) {
-            appendLog("   检测到旧虚拟环境，正在删除...")
-            var removed = false
-            do {
-                try fm.removeItem(atPath: dest)
-                removed = true
-            } catch {
-                appendLog("   ⚠️  FileManager 删除失败，尝试 rm -rf...")
-                let rm = Process()
-                rm.executableURL = URL(fileURLWithPath: "/bin/rm")
-                rm.arguments = ["-rf", dest]
-                try? rm.run()
-                rm.waitUntilExit()
-                removed = rm.terminationStatus == 0
-            }
-            if !removed {
-                appendLog("   ❌ 无法删除旧虚拟环境，请手动删除: \(dest)")
-                return false
-            }
-        }
-        // Copy bundled venv
-        appendLog("   正在复制虚拟环境...")
-        do {
-            try fm.copyItem(atPath: bundledVenvPath, toPath: dest)
-        } catch {
-            appendLog("   ❌ 复制失败: \(error.localizedDescription)")
-            return false
-        }
-        // Remove quarantine attribute inherited from the downloaded DMG — without this
-        // macOS Gatekeeper blocks the Python binary and all .so extensions from running.
-        appendLog("   正在清除隔离属性...")
-        let xattr = Process()
-        xattr.executableURL = URL(fileURLWithPath: "/usr/bin/xattr")
-        xattr.arguments = ["-r", "-d", "com.apple.quarantine", dest]
-        try? xattr.run()
-        xattr.waitUntilExit()
-
-        // Verify — capture stderr for diagnostics
-        if !WhisperBridge.isVenvReady() {
-            let python = dest + "/bin/python"
-            let testProc = Process()
-            testProc.executableURL = URL(fileURLWithPath: python)
-            testProc.arguments = ["-c", "import mlx_whisper, mlx_audio, huggingface_hub"]
-            testProc.environment = WhisperBridge.makeEnv()
-            let errPipe = Pipe()
-            testProc.standardError = errPipe
-            testProc.standardOutput = FileHandle.nullDevice
-            try? testProc.run()
-            testProc.waitUntilExit()
-            let errOutput = String(data: errPipe.fileHandleForReading.readDataToEndOfFile(),
-                                   encoding: .utf8) ?? ""
-            appendLog("   ❌ Python 环境验证失败:")
-            for line in errOutput.components(separatedBy: .newlines) where !line.isEmpty {
-                appendLog("      \(line)")
-            }
-            return false
-        }
-        return true
-    }
-
     private func createVenv() -> Bool {
-        // First try: uv
         let venvPath = NSHomeDirectory() + "/.local/share/typelessmlx/venv"
         let requirementsPath = findRequirementsPath()
 
-        for uvPath in ["/opt/homebrew/bin/uv", "/usr/local/bin/uv", "uv"] {
-            if let uvURL = findExecutable(uvPath) {
-                appendLog("   使用 uv 创建 venv: \(uvURL.path)")
-                let result = runCommand(uvURL.path, args: ["venv", venvPath, "--python", "3.12"],
-                                        env: WhisperBridge.makeEnv())
-                if result {
-                    appendLog("   安装 Python 包...")
-                    let python = venvPath + "/bin/python"
-                    let installResult = runCommand(uvURL.path,
-                                                   args: ["pip", "install", "-p", python, "-r", requirementsPath ?? "requirements.txt"],
-                                                   env: WhisperBridge.makeEnv())
-                    return installResult
-                }
-            }
+        guard let uvPath = findUv() else {
+            appendLog("   ❌ 未找到 uv，请先安装: https://docs.astral.sh/uv/getting-started/installation/")
+            return false
         }
 
-        // Fallback: python3 -m venv
-        appendLog("   未找到 uv，尝试 python3 -m venv...")
-        for pyPath in ["/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3", "/usr/bin/python3"] {
-            if FileManager.default.fileExists(atPath: pyPath) {
-                let venvResult = runCommand(pyPath, args: ["-m", "venv", venvPath], env: WhisperBridge.makeEnv())
-                if venvResult {
-                    let pip = venvPath + "/bin/pip"
-                    let req = requirementsPath ?? ""
-                    if req.isEmpty { return false }
-                    return runCommand(pip, args: ["install", "-r", req], env: WhisperBridge.makeEnv())
-                }
-            }
+        appendLog("   使用 uv 创建 venv（含 Python 3.12）...")
+        let venvOk = runCommand(uvPath, args: ["venv", venvPath, "--python", "3.12"],
+                                env: WhisperBridge.makeEnv())
+        guard venvOk else {
+            appendLog("   ❌ 创建 venv 失败")
+            return false
         }
-        return false
+
+        appendLog("   安装 Python 包...")
+        let python = venvPath + "/bin/python"
+        return runCommand(uvPath,
+                          args: ["pip", "install", "-p", python, "-r", requirementsPath ?? "requirements.txt"],
+                          env: WhisperBridge.makeEnv())
+    }
+
+    private func findUv() -> String? {
+        let env = WhisperBridge.makeEnv()
+        let candidates = ["/opt/homebrew/bin/uv", "/usr/local/bin/uv",
+                          NSHomeDirectory() + "/.local/bin/uv",
+                          NSHomeDirectory() + "/.cargo/bin/uv"]
+            + (env["PATH"] ?? "").split(separator: ":").map { String($0) + "/uv" }
+        return candidates.first { FileManager.default.fileExists(atPath: $0) }
     }
 
     private func findRequirementsPath() -> String? {
@@ -250,20 +161,6 @@ class SetupViewModel: ObservableObject {
             .deletingLastPathComponent()
             .appendingPathComponent("backend/requirements.txt").path
         return FileManager.default.fileExists(atPath: devPath) ? devPath : nil
-    }
-
-    private func findExecutable(_ path: String) -> URL? {
-        if path.hasPrefix("/") {
-            return FileManager.default.fileExists(atPath: path) ? URL(fileURLWithPath: path) : nil
-        }
-        // Search PATH
-        let env = WhisperBridge.makeEnv()
-        let paths = (env["PATH"] ?? "").split(separator: ":").map(String.init)
-        for dir in paths {
-            let full = dir + "/" + path
-            if FileManager.default.fileExists(atPath: full) { return URL(fileURLWithPath: full) }
-        }
-        return nil
     }
 
     private func runCommand(_ executable: String, args: [String], env: [String: String]) -> Bool {

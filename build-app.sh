@@ -8,8 +8,7 @@ APP_BUNDLE="$BUILD_DIR/$APP_NAME.app"
 ENTITLEMENTS="$PROJECT_DIR/TypelessMLX/TypelessMLX.entitlements"
 INSTALL_DIR="/Applications/$APP_NAME.app"
 APP_VERSION=$(/usr/libexec/PlistBuddy -c "Print CFBundleShortVersionString" "$PROJECT_DIR/TypelessMLX/Info.plist" 2>/dev/null || echo "0.0.0")
-VENV_BUNDLED=0   # set to 1 after venv is successfully copied
-DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"  # recalculated after venv step
+DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
 
 INSTALL_APP=0
 MODE="dev"        # dev | release
@@ -125,30 +124,6 @@ cp backend/convert.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/requirements.txt "$APP_BUNDLE/Contents/Resources/backend/"
 echo "  ✅ Python backend copied"
 
-if [ "$MODE" = "release" ]; then
-    VENV_SRC="$HOME/.local/share/typelessmlx/venv"
-    if [ -d "$VENV_SRC" ]; then
-        echo "  📦 Bundling Python venv (resolving symlinks — this takes a while)..."
-        cp -RL "$VENV_SRC" "$APP_BUNDLE/Contents/Resources/venv"
-        # Bundle libpython3.12.dylib — the Python binary links to it via @rpath/../lib
-        # but it lives in the uv-managed Python installation, not in the venv itself.
-        LIBPYTHON=$(find "$HOME/.local/share/uv" "$HOME/.pyenv" /opt/homebrew \
-                         -name "libpython3.12.dylib" 2>/dev/null | head -1)
-        if [ -n "$LIBPYTHON" ]; then
-            cp "$LIBPYTHON" "$APP_BUNDLE/Contents/Resources/venv/lib/"
-            echo "  ✅ libpython3.12.dylib bundled"
-        else
-            echo "  ⚠️  libpython3.12.dylib not found — venv may fail on other machines"
-        fi
-        VENV_BUNDLED=1
-        echo "  ✅ Venv bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/venv" | awk '{print $1}'))"
-    else
-        echo "  ⚠️  No venv at $VENV_SRC — skipping venv bundle"
-    fi
-else
-    echo "  ℹ️  Dev mode: using system venv at ~/.local/share/typelessmlx/venv"
-fi
-
 if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     echo "  ✅ App icon copied"
@@ -169,12 +144,6 @@ codesign -dvv "$APP_BUNDLE" 2>&1 | grep -E "Identifier|Authority|TeamIdentifier|
 
 # ── Step 4: DMG + model archives (release only) ───────────────────────────────
 if [ "$MODE" = "release" ]; then
-    # Recalculate DMG name now that we know whether venv was bundled
-    if [ "$VENV_BUNDLED" = "1" ]; then
-        DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}-full.dmg"
-    else
-        DMG_PATH="$BUILD_DIR/${APP_NAME}-${APP_VERSION}.dmg"
-    fi
     echo ""
     echo "💿 Creating DMG..."
     DMG_STAGING="$BUILD_DIR/dmg-staging"

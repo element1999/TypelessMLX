@@ -181,9 +181,12 @@ class MeetingCaptureEngine: NSObject {
         lastEnglishSentForTranslation = ""
         translationGeneration += 1
 
-        if appState?.hasPythonBackend == true {
+        WhisperBridge.shared.start { success in
+            AppState.shared.hasPythonBackend = success
+            AppState.shared.updatePermissionState()
+            guard success else { return }
             let prompt = DictionaryService.shared.buildPrompt(basePrompt: AppState.shared.initialPrompt)
-            WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: subtitleModelPath, initialPrompt: prompt, reset: true) { _ in }
+            WhisperBridge.shared.streamSubtitle(audioURL: nil, modelPath: self.subtitleModelPath, initialPrompt: prompt, reset: true) { _ in }
         }
 
         chunkTimer = Timer.scheduledTimer(withTimeInterval: Self.chunkInterval, repeats: true) { [weak self] _ in
@@ -230,12 +233,9 @@ class MeetingCaptureEngine: NSObject {
 
     private func handleSubtitleChunk(_ chunk: WhisperBridge.SubtitleChunk) {
         if chunk.committed {
-            // Transcript: write full utterance once at commit (no duplicates)
+            // Transcript: write full utterance once at commit
             for pair in chunk.utteranceSentences {
                 transcriptOverlay?.commitEntry(english: pair.en, chinese: pair.zh)
-            }
-            if !chunk.text.isEmpty {
-                transcriptOverlay?.commitEntry(english: chunk.text, chinese: chunk.chinese)
             }
             // Subtitle bar: show tail or last eager sentence
             if !chunk.text.isEmpty {
