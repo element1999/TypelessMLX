@@ -8,7 +8,7 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "https://github.com/argmaxinc/WhisperKit", from: "1.0.0"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-examples", exact: "2.29.1"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm", from: "2.31.3"),
         .package(url: "https://github.com/genericgroup/sherpa-onnx-spm", exact: "1.0.4"),
     ],
     targets: [
@@ -29,8 +29,8 @@ let package = Package(
                 "TypelessMLXAudioTapSupport",
                 "TypelessMLXAudioInputSupport",
                 .product(name: "WhisperKit", package: "WhisperKit"),
-                .product(name: "MLXLLM", package: "mlx-swift-examples"),
-                .product(name: "MLXLMCommon", package: "mlx-swift-examples"),
+                .product(name: "MLXLLM", package: "mlx-swift-lm"),
+                .product(name: "MLXLMCommon", package: "mlx-swift-lm"),
                 .product(name: "CSherpaOnnx", package: "sherpa-onnx-spm"),
             ],
             path: "TypelessMLX/Sources",
