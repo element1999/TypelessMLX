@@ -1,221 +1,153 @@
+import AVFoundation
 import Foundation
+import Qwen3ASR
 
-/// Manages the asr-server Rust binary as a long-running subprocess and exposes
-/// HTTP-based transcription via POST /v1/audio/transcriptions (OpenAI-compatible).
+/// Manages Qwen3ASR on-device transcription.
 ///
-/// Usage:
-///   let text = try await ASRService.shared.transcribe(url: wavURL, language: "zh")
+/// - `transcribe(url:language:)` — for voice dictation (WAV file from AudioTapFileWriter)
+/// - `transcribe(audio:sampleRate:language:)` — for subtitle streaming (raw [Float] from SCStream)
+///
+/// The `Qwen3ASRModel` instance is loaded lazily on first call and reloaded
+/// if `AppState.resolvedModelPath` changes.
 actor ASRService {
     static let shared = ASRService()
 
-    private var process: Process?
-    private var port: Int = 0
+    private var model: Qwen3ASRModel?
+    private var loadTask: Task<Qwen3ASRModel, Error>?
     private var currentModelPath: String = ""
-    private let urlSession = URLSession(configuration: .ephemeral)
-
-    private static let healthPollInterval: TimeInterval = 0.2
-    private static let healthPollTimeout: TimeInterval = 30.0
 
     private init() {}
 
     // MARK: - Public API
 
-    /// Transcribes the WAV file at `url`.
-    /// Lazily starts the asr-server subprocess on first call; restarts it when
-    /// the resolved model path changes.
+    /// Transcribes the WAV file at `url`. For voice dictation via HotkeyManager.
     func transcribe(url: URL, language: String? = nil) async throws -> String {
+        let (samples, sampleRate) = try loadAudio(from: url)
+        return try await transcribe(audio: samples, sampleRate: sampleRate, language: language)
+    }
+
+    /// Transcribes raw PCM samples. For subtitle streaming via MeetingCaptureEngine.
+    func transcribe(audio: [Float], sampleRate: Int = 16000, language: String? = nil) async throws -> String {
         let modelPath = resolveModelPath(await MainActor.run { AppState.shared.resolvedModelPath })
-
-        if process == nil || !isProcessRunning() || currentModelPath != modelPath {
-            try await startServer(modelPath: modelPath)
-        }
-
-        return try await postAudio(url: url, language: language)
+        let m = try await loadedModel(modelPath: modelPath)
+        let lang = (language?.isEmpty == false && language != "auto") ? language : nil
+        // transcribe() is synchronous and GPU-intensive — run off the cooperative thread pool.
+        return try await Task.detached(priority: .userInitiated) {
+            m.transcribe(audio: audio, sampleRate: sampleRate, language: lang)
+        }.value
     }
 
-    /// Terminates the asr-server subprocess.
+    /// Releases the loaded model.
     func stop() {
-        process?.terminate()
-        process = nil
+        model = nil
+        loadTask?.cancel()
+        loadTask = nil
         currentModelPath = ""
-        port = 0
-        logInfo("ASRService", "asr-server stopped")
+        logInfo("ASRService", "ASRService stopped")
     }
 
-    // MARK: - Server Lifecycle
+    // MARK: - Model Lifecycle
 
-    private func startServer(modelPath: String) async throws {
-        // Terminate any existing process before starting fresh
-        if let existing = process {
-            existing.terminate()
-            process = nil
-        }
+    private func loadedModel(modelPath: String) async throws -> Qwen3ASRModel {
+        if let m = model, currentModelPath == modelPath { return m }
+        if let t = loadTask, currentModelPath == modelPath { return try await t.value }
 
-        guard !modelPath.isEmpty else {
-            throw NSError(domain: "ASRService", code: -1,
-                          userInfo: [NSLocalizedDescriptionKey: "Model path is empty"])
-        }
-
-        guard FileManager.default.fileExists(atPath: modelPath) else {
-            throw NSError(domain: "ASRService", code: -2,
-                          userInfo: [NSLocalizedDescriptionKey: "Model path not found: \(modelPath)"])
-        }
-
-        let binaryPath = resolveBinaryPath()
-        guard FileManager.default.fileExists(atPath: binaryPath) else {
-            throw NSError(domain: "ASRService", code: -3,
-                          userInfo: [NSLocalizedDescriptionKey: "asr-server binary not found at: \(binaryPath)"])
-        }
-
-        let newPort = Int.random(in: 18000...19000)
-        logInfo("ASRService", "Starting asr-server on port \(newPort), model: \(modelPath)")
-
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: binaryPath)
-        proc.arguments = ["--model-dir", modelPath, "--port", "\(newPort)"]
-
-        // Redirect stdout/stderr to logger
-        let stderrPipe = Pipe()
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = stderrPipe
-
-        stderrPipe.fileHandleForReading.readabilityHandler = { handle in
-            let data = handle.availableData
-            if !data.isEmpty, let text = String(data: data, encoding: .utf8) {
-                let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !trimmed.isEmpty { logDebug("asr-server", trimmed) }
-            }
-        }
-
-        proc.terminationHandler = { [weak self] p in
-            logWarn("ASRService", "asr-server terminated (exit: \(p.terminationStatus))")
-            Task { await self?.handleTermination() }
-        }
-
-        do {
-            try proc.run()
-        } catch {
-            throw NSError(domain: "ASRService", code: -4,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to launch asr-server: \(error.localizedDescription)"])
-        }
-
-        process = proc
-        port = newPort
+        loadTask?.cancel()
         currentModelPath = modelPath
 
-        try await waitForHealth()
-        logInfo("ASRService", "asr-server ready on port \(newPort)")
+        let t = Task<Qwen3ASRModel, Error> { [weak self] in
+            guard let self else { throw CancellationError() }
+            let m = try await self.buildModel(modelPath: modelPath)
+            await self.storeModel(m, path: modelPath)
+            return m
+        }
+        loadTask = t
+        return try await t.value
     }
 
-    private func handleTermination() {
-        process = nil
-        currentModelPath = ""
+    private func storeModel(_ m: Qwen3ASRModel, path: String) {
+        model = m
+        loadTask = nil
+        currentModelPath = path
+        logInfo("ASRService", "Qwen3ASR model ready: \(path.split(separator: "/").last ?? Substring(path))")
     }
 
-    private func isProcessRunning() -> Bool {
-        return process?.isRunning == true
-    }
-
-    // MARK: - Health Check
-
-    private func waitForHealth() async throws {
-        guard let healthURL = URL(string: "http://localhost:\(port)/health") else { return }
-        let deadline = Date().addingTimeInterval(Self.healthPollTimeout)
-        while Date() < deadline {
-            if let (_, response) = try? await urlSession.data(from: healthURL),
-               (response as? HTTPURLResponse)?.statusCode == 200 {
-                return
+    private func buildModel(modelPath: String) async throws -> Qwen3ASRModel {
+        logInfo("ASRService", "Loading Qwen3ASR model: \(modelPath)")
+        // Absolute snapshot path (already on disk) — load offline.
+        if modelPath.hasPrefix("/"), FileManager.default.fileExists(atPath: modelPath) {
+            let cacheDir = URL(fileURLWithPath: modelPath)
+            return try await Qwen3ASRModel.fromPretrained(
+                modelId: modelPath,
+                cacheDir: cacheDir,
+                offlineMode: true
+            ) { progress, status in
+                logDebug("ASRService", "Load \(Int(progress * 100))% \(status)")
             }
-            try await Task.sleep(nanoseconds: UInt64(Self.healthPollInterval * 1_000_000_000))
         }
-        throw NSError(domain: "ASRService", code: -5,
-                      userInfo: [NSLocalizedDescriptionKey:
-                                    "asr-server did not become ready within \(Self.healthPollTimeout)s"])
+        // HF repo ID — download to speech-swift's own cache.
+        let repoId = modelPath.isEmpty ? "mlx-community/Qwen3-ASR-0.6B-8bit" : modelPath
+        return try await Qwen3ASRModel.fromPretrained(modelId: repoId) { progress, status in
+            logDebug("ASRService", "Download \(Int(progress * 100))% \(status)")
+        }
     }
 
-    // MARK: - HTTP Transcription
+    // MARK: - Helpers
 
-    private func postAudio(url: URL, language: String?) async throws -> String {
-        guard let endpoint = URL(string: "http://localhost:\(port)/v1/audio/transcriptions") else {
-            throw NSError(domain: "ASRService", code: -6,
-                          userInfo: [NSLocalizedDescriptionKey: "Invalid endpoint URL"])
+    /// Loads a WAV file produced by AudioTapFileWriter into Float32 samples.
+    /// Uses AVAudioFile so any format/sample-rate written by the tap works.
+    private func loadAudio(from url: URL) throws -> (samples: [Float], sampleRate: Int) {
+        let file = try AVAudioFile(forReading: url)
+        let srcFormat = file.processingFormat
+        let targetFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: srcFormat.sampleRate,
+            channels: 1,
+            interleaved: false
+        )!
+
+        let frameCount = AVAudioFrameCount(file.length)
+        guard frameCount > 0 else { return ([], Int(srcFormat.sampleRate)) }
+
+        if srcFormat.channelCount == 1 && srcFormat.commonFormat == .pcmFormatFloat32 {
+            let buf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount)!
+            try file.read(into: buf)
+            let count = Int(buf.frameLength)
+            let ptr = buf.floatChannelData![0]
+            return (Array(UnsafeBufferPointer(start: ptr, count: count)), Int(srcFormat.sampleRate))
         }
 
-        var request = URLRequest(url: endpoint)
-        request.httpMethod = "POST"
+        // Convert format (stereo → mono, int16 → float32, etc.)
+        let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount)!
+        try file.read(into: srcBuf)
 
-        let boundary = "TypelessMLXBoundary-\(UUID().uuidString)"
-        request.setValue("multipart/form-data; boundary=\(boundary)",
-                         forHTTPHeaderField: "Content-Type")
-
-        // Synchronous read is acceptable: WAV chunks are ~16KB (0.5s at 16kHz mono)
-        let audioData = try Data(contentsOf: url)
-        var body = Data()
-
-        // Audio file field
-        body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"file\"; filename=\"audio.wav\"\r\n")
-        body.appendString("Content-Type: audio/wav\r\n\r\n")
-        body.append(audioData)
-        body.appendString("\r\n")
-
-        // Model field (required by OpenAI-compatible API)
-        body.appendString("--\(boundary)\r\n")
-        body.appendString("Content-Disposition: form-data; name=\"model\"\r\n\r\n")
-        body.appendString("qwen3-asr\r\n")
-
-        // Optional language field
-        if let lang = language, !lang.isEmpty, lang != "auto" {
-            body.appendString("--\(boundary)\r\n")
-            body.appendString("Content-Disposition: form-data; name=\"language\"\r\n\r\n")
-            body.appendString("\(lang)\r\n")
+        guard let converter = AVAudioConverter(from: srcFormat, to: targetFormat) else {
+            throw NSError(domain: "ASRService", code: -10,
+                          userInfo: [NSLocalizedDescriptionKey: "Cannot create audio converter"])
         }
-
-        body.appendString("--\(boundary)--\r\n")
-        request.httpBody = body
-
-        let (responseData, response) = try await urlSession.data(for: request)
-        guard let httpResponse = response as? HTTPURLResponse else {
-            throw NSError(domain: "ASRService", code: -7,
-                          userInfo: [NSLocalizedDescriptionKey: "Invalid HTTP response"])
+        let outCount = AVAudioFrameCount(
+            Double(srcBuf.frameLength) * targetFormat.sampleRate / srcFormat.sampleRate
+        ) + 1
+        let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outCount)!
+        var convError: NSError?
+        var didProvide = false
+        converter.convert(to: outBuf, error: &convError) { _, outStatus in
+            if didProvide { outStatus.pointee = .noDataNow; return nil }
+            outStatus.pointee = .haveData
+            didProvide = true
+            return srcBuf
         }
-        guard httpResponse.statusCode == 200 else {
-            let responseBody = String(data: responseData, encoding: .utf8) ?? "(no body)"
-            throw NSError(domain: "ASRService", code: httpResponse.statusCode,
-                          userInfo: [NSLocalizedDescriptionKey:
-                                        "HTTP \(httpResponse.statusCode): \(responseBody)"])
-        }
+        if let e = convError { throw e }
 
-        guard let json = try? JSONSerialization.jsonObject(with: responseData) as? [String: Any],
-              let text = json["text"] as? String else {
-            throw NSError(domain: "ASRService", code: -8,
-                          userInfo: [NSLocalizedDescriptionKey: "Failed to parse transcription response"])
-        }
-
-        logInfo("ASRService", "Transcription (\(text.count) chars): \(text.prefix(80))")
-        return text
+        let count = Int(outBuf.frameLength)
+        let ptr = outBuf.floatChannelData![0]
+        return (Array(UnsafeBufferPointer(start: ptr, count: count)), Int(targetFormat.sampleRate))
     }
 
-    // MARK: - Path Resolution
-
-    private func resolveBinaryPath() -> String {
-        // Production: app bundle Contents/Resources/bin/asr-server
-        if let resourcePath = Bundle.main.resourcePath {
-            let bundledPath = (resourcePath as NSString).appendingPathComponent("bin/asr-server")
-            if FileManager.default.fileExists(atPath: bundledPath) { return bundledPath }
-        }
-        // Dev fallback: vendor/qwen3_asr_rs/target/release/asr-server (relative to this source file)
-        let projectRoot = URL(fileURLWithPath: #file)
-            .deletingLastPathComponent() // Sources/
-            .deletingLastPathComponent() // TypelessMLX/
-            .deletingLastPathComponent() // project root
-        return projectRoot.appendingPathComponent("vendor/qwen3_asr_rs/target/release/asr-server").path
-    }
-
+    /// Resolves an HF repo ID to the local HF cache snapshot path.
+    /// Returns the input unchanged if already absolute or no snapshot found.
     private func resolveModelPath(_ modelPath: String) -> String {
-        // If it's already an absolute path, use it directly
-        if modelPath.hasPrefix("/") { return modelPath }
-        // Convert HF repo ID (e.g. "mlx-community/Qwen3-ASR-0.6B-8bit") to local cache snapshot
+        guard !modelPath.hasPrefix("/") else { return modelPath }
         let sanitized = modelPath.replacingOccurrences(of: "/", with: "--")
         let cacheBase = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)/snapshots")
@@ -223,14 +155,6 @@ actor ASRService {
         if let snapshot = snapshots.sorted().last {
             return (cacheBase as NSString).appendingPathComponent(snapshot)
         }
-        return modelPath  // fallback: return as-is, server will error with a clear message
-    }
-}
-
-// MARK: - Data helper
-
-private extension Data {
-    mutating func appendString(_ string: String) {
-        if let data = string.data(using: .utf8) { append(data) }
+        return modelPath
     }
 }
