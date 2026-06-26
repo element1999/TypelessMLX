@@ -1,20 +1,18 @@
 import AVFoundation
 import Foundation
+import MLX
 import Qwen3ASR
 
 /// Manages Qwen3ASR on-device transcription.
 ///
 /// - `transcribe(url:language:)` — for voice dictation (WAV file from AudioTapFileWriter)
 /// - `transcribe(audio:sampleRate:language:)` — for subtitle streaming (raw [Float] from SCStream)
-///
-/// The `Qwen3ASRModel` instance is loaded lazily on first call and reloaded
-/// if `AppState.resolvedModelPath` changes.
 actor ASRService {
     static let shared = ASRService()
 
     private var model: Qwen3ASRModel?
     private var loadTask: Task<Qwen3ASRModel, Error>?
-    private var currentModelPath: String = ""
+    private var currentModelKey: String = ""
 
     private init() {}
 
@@ -28,12 +26,22 @@ actor ASRService {
 
     /// Transcribes raw PCM samples. For subtitle streaming via MeetingCaptureEngine.
     func transcribe(audio: [Float], sampleRate: Int = 16000, language: String? = nil) async throws -> String {
-        let modelPath = resolveModelPath(await MainActor.run { AppState.shared.resolvedModelPath })
-        let m = try await loadedModel(modelPath: modelPath)
+        let selectedModel = await MainActor.run { AppState.shared.selectedModel }
+        let requestedModelId = selectedModel.repoOrPath
+        let localSnapshotPath = resolveLocalSnapshotPath(requestedModelId)
+        let modelKey = localSnapshotPath ?? requestedModelId
+        let loaded = try await loadedModel(
+            modelKey: modelKey,
+            requestedModelId: requestedModelId,
+            localSnapshotPath: localSnapshotPath
+        )
         let lang = (language?.isEmpty == false && language != "auto") ? language : nil
+        let device = preferredMLXDevice()
         // transcribe() is synchronous and GPU-intensive — run off the cooperative thread pool.
-        return try await Task.detached(priority: .userInitiated) {
-            m.transcribe(audio: audio, sampleRate: sampleRate, language: lang)
+        return await Task.detached(priority: .userInitiated) {
+            Device.withDefaultDevice(device) {
+                loaded.transcribe(audio: audio, sampleRate: sampleRate, language: lang)
+            }
         }.value
     }
 
@@ -42,56 +50,67 @@ actor ASRService {
         model = nil
         loadTask?.cancel()
         loadTask = nil
-        currentModelPath = ""
+        currentModelKey = ""
         logInfo("ASRService", "ASRService stopped")
     }
 
     // MARK: - Model Lifecycle
 
-    private func loadedModel(modelPath: String) async throws -> Qwen3ASRModel {
-        if let m = model, currentModelPath == modelPath { return m }
-        if let t = loadTask, currentModelPath == modelPath { return try await t.value }
+    private func loadedModel(
+        modelKey: String,
+        requestedModelId: String,
+        localSnapshotPath: String?
+    ) async throws -> Qwen3ASRModel {
+        if let m = model, currentModelKey == modelKey { return m }
+        if let t = loadTask, currentModelKey == modelKey { return try await t.value }
 
         loadTask?.cancel()
-        currentModelPath = modelPath
+        currentModelKey = modelKey
 
         let t = Task<Qwen3ASRModel, Error> { [weak self] in
             guard let self else { throw CancellationError() }
-            let m = try await self.buildModel(modelPath: modelPath)
-            await self.storeModel(m, path: modelPath)
+            let m = try await self.buildModel(requestedModelId: requestedModelId, localSnapshotPath: localSnapshotPath)
+            await self.storeModel(m, key: modelKey)
             return m
         }
         loadTask = t
         return try await t.value
     }
 
-    private func storeModel(_ m: Qwen3ASRModel, path: String) {
-        guard currentModelPath == path else {
-            logDebug("ASRService", "Discarding stale model load for \(path.split(separator: "/").last ?? Substring(path))")
+    private func storeModel(_ m: Qwen3ASRModel, key: String) {
+        guard currentModelKey == key else {
+            logDebug("ASRService", "Discarding stale model load for \(key.split(separator: "/").last ?? Substring(key))")
             return
         }
         model = m
         loadTask = nil
-        logInfo("ASRService", "Qwen3ASR model ready: \(path.split(separator: "/").last ?? Substring(path))")
+        logInfo("ASRService", "Qwen3ASR model ready: \(key.split(separator: "/").last ?? Substring(key))")
     }
 
-    private func buildModel(modelPath: String) async throws -> Qwen3ASRModel {
-        logInfo("ASRService", "Loading Qwen3ASR model: \(modelPath)")
-        // Absolute snapshot path (already on disk) — load offline.
-        if modelPath.hasPrefix("/"), FileManager.default.fileExists(atPath: modelPath) {
-            let cacheDir = URL(fileURLWithPath: modelPath)
-            return try await Qwen3ASRModel.fromPretrained(
-                modelId: modelPath,
-                cacheDir: cacheDir,
-                offlineMode: true
-            ) { progress, status in
-                logDebug("ASRService", "Load \(Int(progress * 100))% \(status)")
+    private func buildModel(requestedModelId: String, localSnapshotPath: String?) async throws -> Qwen3ASRModel {
+        let modelId = requestedModelId.isEmpty ? "mlx-community/Qwen3-ASR-0.6B-8bit" : requestedModelId
+
+        if let localSnapshotPath = localSnapshotPath {
+            logInfo("ASRService", "Loading Qwen3ASR model (local): \(localSnapshotPath)")
+            let cacheDir = URL(fileURLWithPath: localSnapshotPath)
+            return try await Device.withDefaultDevice(preferredMLXDevice()) {
+                try await Qwen3ASRModel.fromPretrained(
+                    modelId: modelId,
+                    cacheDir: cacheDir,
+                    offlineMode: true
+                ) { progress, status in
+                    let normalized = status.contains("Downloading") ? "Loading local files..." : status
+                    logDebug("ASRService", "Load \(Int(progress * 100))% \(normalized)")
+                }
             }
         }
-        // HF repo ID — download to speech-swift's own cache.
-        let repoId = modelPath.isEmpty ? "mlx-community/Qwen3-ASR-0.6B-8bit" : modelPath
-        return try await Qwen3ASRModel.fromPretrained(modelId: repoId) { progress, status in
-            logDebug("ASRService", "Download \(Int(progress * 100))% \(status)")
+
+        // HF repo ID — download/cache via speech-swift.
+        logInfo("ASRService", "Loading Qwen3ASR model (remote/cache): \(modelId)")
+        return try await Device.withDefaultDevice(preferredMLXDevice()) {
+            try await Qwen3ASRModel.fromPretrained(modelId: modelId) { progress, status in
+                logDebug("ASRService", "Download \(Int(progress * 100))% \(status)")
+            }
         }
     }
 
@@ -126,7 +145,7 @@ actor ASRService {
             return (Array(UnsafeBufferPointer(start: ptr, count: count)), Int(srcFormat.sampleRate))
         }
 
-        // Convert format (stereo → mono, int16 → float32, etc.)
+        // Convert format (stereo -> mono, int16 -> float32, etc.)
         guard let srcBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
             throw NSError(domain: "ASRService", code: -13,
                           userInfo: [NSLocalizedDescriptionKey: "Cannot create audio buffer"])
@@ -159,17 +178,51 @@ actor ASRService {
         return (Array(UnsafeBufferPointer(start: ptr, count: count)), Int(targetFormat.sampleRate))
     }
 
-    /// Resolves an HF repo ID to the local HF cache snapshot path.
-    /// Returns the input unchanged if already absolute or no snapshot found.
-    private func resolveModelPath(_ modelPath: String) -> String {
-        guard !modelPath.hasPrefix("/") else { return modelPath }
-        let sanitized = modelPath.replacingOccurrences(of: "/", with: "--")
+    /// Resolves an HF repo ID to the newest valid local HF snapshot path.
+    /// Returns nil if no suitable local snapshot exists.
+    private func resolveLocalSnapshotPath(_ modelId: String) -> String? {
+        guard !modelId.isEmpty else { return nil }
+        guard !modelId.hasPrefix("/") else {
+            return FileManager.default.fileExists(atPath: modelId) ? modelId : nil
+        }
+
+        let sanitized = modelId.replacingOccurrences(of: "/", with: "--")
         let cacheBase = (NSHomeDirectory() as NSString)
             .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)/snapshots")
-        let snapshots = (try? FileManager.default.contentsOfDirectory(atPath: cacheBase)) ?? []
-        if let snapshot = snapshots.sorted().last {
-            return (cacheBase as NSString).appendingPathComponent(snapshot)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: cacheBase) else {
+            return nil
         }
-        return modelPath
+
+        let snapshots: [URL] = names.map { name in
+            URL(fileURLWithPath: cacheBase).appendingPathComponent(name, isDirectory: true)
+        }.filter { isUsableSnapshot($0.path) }
+
+        let newest = snapshots.max { lhs, rhs in
+            let lDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lDate < rDate
+        }
+        return newest?.path
+    }
+
+    private func isUsableSnapshot(_ path: String) -> Bool {
+        let required = ["config.json", "model.safetensors", "tokenizer.json", "vocab.json"]
+        return required.allSatisfy { file in
+            FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent(file))
+        }
+    }
+
+    private func preferredMLXDevice() -> Device {
+        hasBundledMLXMetallib() ? .gpu : .cpu
+    }
+
+    private func hasBundledMLXMetallib() -> Bool {
+        let bundle = Bundle.main
+        let candidates = [
+            bundle.bundleURL.appendingPathComponent("Contents/MacOS/mlx.metallib"),
+            bundle.resourceURL?.appendingPathComponent("mlx.metallib"),
+            bundle.resourceURL?.appendingPathComponent("default.metallib"),
+        ].compactMap { $0 }
+        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 }

@@ -51,12 +51,12 @@ class LLMService {
     private func loadModel() async throws -> ModelContainer {
         let repoID = AppState.shared.resolvedTextModelPath
         logInfo("LLMService", "Loading text model: \(repoID)")
-        // Check standard HF cache paths first (compatible with Python-downloaded models)
+        // Check standard HuggingFace cache paths first.
         if let localURL = resolveLocalURL(repoID) {
             logInfo("LLMService", "Found cached model at: \(localURL.path)")
             return try await loadModelContainer(directory: localURL)
         }
-        // Download via HF, storing in ~/.cache/huggingface to match Python convention
+        // Download via HuggingFace, storing in ~/.cache/huggingface.
         logInfo("LLMService", "Model not cached, downloading: \(repoID)")
         let hub = makeHubApi()
         return try await loadModelContainer(hub: hub, id: repoID)
@@ -81,7 +81,7 @@ class LLMService {
     }
 
     private func makeHubApi() -> HubApi {
-        // Store in ~/.cache/huggingface to match Python huggingface_hub convention
+        // Store in the standard HuggingFace cache layout.
         let cacheBase = URL(fileURLWithPath: NSHomeDirectory() + "/.cache/huggingface")
         let endpoint = ProcessInfo.processInfo.environment["HF_ENDPOINT"] ?? "https://hf-mirror.com"
         return HubApi(downloadBase: cacheBase, endpoint: endpoint)

@@ -1,4 +1,5 @@
 import Foundation
+import HuggingFace
 
 /// Manages on-disk cache for MLX models (HuggingFace Hub + local converted models).
 class ModelManager: ObservableObject {
@@ -9,7 +10,7 @@ class ModelManager: ObservableObject {
     @Published var downloadError: String? = nil
     @Published var cachedSizes: [String: Int64] = [:]  // modelID → bytes, 0 = not cached
 
-    private var downloadProcess: Process?
+    private var downloadTask: Task<Void, Never>?
     private let queue = DispatchQueue(label: "com.typelessmlx.modelmanager", qos: .utility)
 
     private init() {
@@ -58,56 +59,25 @@ class ModelManager: ObservableObject {
         }
         logInfo("ModelManager", "Starting download: \(model.repoOrPath)")
 
-        queue.async { [weak self] in
+        downloadTask = Task { [weak self] in
             guard let self = self else { return }
-            let python = Self.pythonPath
-            let script = """
-import sys, os
-os.environ['HF_HOME'] = os.path.expanduser('~/.cache/huggingface')
-from huggingface_hub import snapshot_download
-snapshot_download('\(model.repoOrPath)')
-print('DONE')
-sys.stdout.flush()
-"""
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: python)
-            proc.arguments = ["-c", script]
-            proc.environment = Self.makeDownloadEnv()
-
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = errPipe
-
-            errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                let data = handle.availableData
-                if !data.isEmpty, let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                    logDebug("ModelManager", text)
-                    // Parse "Fetching N files: X%|..." progress from huggingface_hub
-                    if text.contains("Fetching") || text.contains("Downloading") {
-                        let status: String
-                        if let range = text.range(of: #"(\d+)/(\d+)"#, options: .regularExpression) {
-                            status = "下载中 \(text[range]) 个文件..."
-                        } else if text.contains("%") {
-                            status = "下载中..."
-                        } else {
-                            status = "下载中..."
-                        }
-                        DispatchQueue.main.async { self?.downloadStatusText = status }
-                    }
-                }
-            }
-
-            self.downloadProcess = proc
+            let success: Bool
             do {
-                try proc.run()
-                proc.waitUntilExit()
+                let repo = try Self.repoID(from: model.repoOrPath)
+                let client = Self.hubClient()
+                _ = try await client.downloadSnapshot(
+                    of: repo,
+                    maxConcurrentDownloads: 4
+                ) { [weak self] progress in
+                    self?.downloadStatusText = Self.progressText(progress)
+                }
+                success = true
             } catch {
-                logError("ModelManager", "Download process error: \(error)")
+                if Task.isCancelled { return }
+                success = false
+                logError("ModelManager", "Download error: \(error)")
             }
 
-            errPipe.fileHandleForReading.readabilityHandler = nil
-            let success = proc.terminationStatus == 0
             logInfo("ModelManager", "Download \(success ? "succeeded" : "failed") for \(model.id)")
 
             // Compute disk size on background thread to avoid blocking main thread
@@ -116,7 +86,7 @@ sys.stdout.flush()
                 guard let self = self else { return }
                 self.downloadingModelID = nil
                 self.downloadStatusText = ""
-                self.downloadProcess = nil
+                self.downloadTask = nil
                 self.cachedSizes[model.id] = size
                 self.downloadError = success ? nil : "下载失败：\(model.id)"
             }
@@ -124,8 +94,8 @@ sys.stdout.flush()
     }
 
     func cancelDownload() {
-        downloadProcess?.terminate()
-        downloadProcess = nil
+        downloadTask?.cancel()
+        downloadTask = nil
         DispatchQueue.main.async {
             self.downloadingModelID = nil
             self.downloadError = nil
@@ -143,29 +113,32 @@ sys.stdout.flush()
         DispatchQueue.main.async { self.cachedSizes[model.id] = 0 }
     }
 
-    // MARK: - Python helpers for HuggingFace downloads
+    // MARK: - HuggingFace downloads
 
-    private static var pythonPath: String {
-        let venvPython = NSHomeDirectory() + "/.local/share/typelessmlx/venv/bin/python"
-        if FileManager.default.fileExists(atPath: venvPython) { return venvPython }
-        for path in ["/opt/homebrew/bin/python3.12", "/opt/homebrew/bin/python3", "/usr/bin/python3"] {
-            if FileManager.default.fileExists(atPath: path) { return path }
+    private static func repoID(from value: String) throws -> Repo.ID {
+        guard let repo = Repo.ID(rawValue: value) else {
+            throw NSError(domain: "ModelManager", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid HuggingFace repo: \(value)"])
         }
-        return "python3"
+        return repo
     }
 
-    private static func makeDownloadEnv() -> [String: String] {
-        var env = ProcessInfo.processInfo.environment
-        let venvBin = NSHomeDirectory() + "/.local/share/typelessmlx/venv/bin"
-        let paths = [venvBin, "/opt/homebrew/bin", "/usr/local/bin", "/usr/bin", "/bin"]
-        env["PATH"] = (paths + [(env["PATH"] ?? "")]).joined(separator: ":")
-        env["HF_HOME"] = NSHomeDirectory() + "/.cache/huggingface"
-        env["PYTHONUNBUFFERED"] = "1"
-        env["HF_HUB_OFFLINE"] = "0"
-        if env["HF_ENDPOINT"] == nil {
-            env["HF_ENDPOINT"] = "https://hf-mirror.com"
+    private static func hubClient() -> HubClient {
+        let cache = HubCache(cacheDirectory: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub"))
+        let hostString = ProcessInfo.processInfo.environment["HF_ENDPOINT"] ?? "https://hf-mirror.com"
+        let host = URL(string: hostString) ?? HubClient.defaultHost
+        return HubClient(host: host, userAgent: "TypelessMLX", cache: cache)
+    }
+
+    private static func progressText(_ progress: Progress) -> String {
+        let completed = progress.completedUnitCount
+        let total = progress.totalUnitCount
+        if total > 0 {
+            let percent = Int((Double(completed) / Double(total)) * 100)
+            return "下载中 \(percent)%..."
         }
-        return env
+        return "下载中..."
     }
 
     // MARK: - Paths

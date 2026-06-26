@@ -36,7 +36,7 @@
 
 | 模型 | 大小 | 特点 |
 |------|------|------|
-| macOS 内置 | 无需下载 | 最快，无需 Python |
+| macOS 内置 | 无需下载 | 最快 |
 | Qwen3-ASR 0.6B | ~1 GB | 中文最佳，**推荐** |
 | Qwen3-ASR 1.7B | ~2 GB | 更高精度 |
 | Whisper Large v3 | ~3 GB | 多语言，最高精度 |
@@ -67,10 +67,9 @@ bash install.sh
 
 ### 3. 首次启动
 1. 打开 TypelessMLX，菜单栏出现图标
-2. 弹出设置窗口，点击「开始安装」部署 Python 环境（约 1 分钟）
-3. 授权麦克风、辅助功能权限
-4. 在设置中选择 ASR 模型，如有需要点击下载
-5. 按住 Right Option 开始说话
+2. 授权麦克风、辅助功能权限
+3. 在设置中选择 ASR 模型，如有需要点击下载
+4. 按住 Right Option 开始说话
 
 ---
 
@@ -85,7 +84,7 @@ bash install.sh
 
 ## 隐私
 
-所有推理均在本机完成，不上传任何语音或文字数据。Python 后端运行于 `~/.local/share/typelessmlx/venv/`，模型缓存于 `~/.cache/huggingface/hub/`。
+所有推理均在本机完成，不上传任何语音或文字数据。模型缓存于 `~/.cache/huggingface/hub/`。
 
 ---
 

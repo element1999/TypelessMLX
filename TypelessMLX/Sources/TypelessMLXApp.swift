@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import MLX
 
 @main
 struct TypelessMLXApp: App {
@@ -21,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installCrashHandler()
         logInfo("App", "TypelessMLX launching...")
+        prewarmMLXRuntime()
 
         // Menu bar only app — no Dock icon
         NSApp.setActivationPolicy(.accessory)
@@ -57,6 +59,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         logInfo("App", "TypelessMLX launch complete")
+    }
+
+    private func prewarmMLXRuntime() {
+        logInfo("App", "Prewarming MLX runtime on main thread...")
+        let hasMetallib = hasBundledMLXMetallib()
+        let deviceLabel = hasMetallib ? "gpu" : "cpu"
+        if !hasMetallib {
+            logInfo("App", "MLX metallib not bundled; using CPU device to avoid Metal loader abort")
+        }
+        let warmup = Device.withDefaultDevice(hasMetallib ? .gpu : .cpu) {
+            MLXArray.zeros([1])
+        }
+        logInfo("App", "MLX runtime prewarmed on \(deviceLabel): shape=\(warmup.shape)")
+    }
+
+    private func hasBundledMLXMetallib() -> Bool {
+        let bundle = Bundle.main
+        let candidates = [
+            bundle.bundleURL.appendingPathComponent("Contents/MacOS/mlx.metallib"),
+            bundle.resourceURL?.appendingPathComponent("mlx.metallib"),
+            bundle.resourceURL?.appendingPathComponent("default.metallib"),
+        ].compactMap { $0 }
+        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
     }
 
     func applicationWillTerminate(_ notification: Notification) {

@@ -1,3 +1,0 @@
-[submodule "vendor/qwen3_asr_rs"]
-	path = vendor/qwen3_asr_rs
-	url = https://github.com/second-state/qwen3_asr_rs

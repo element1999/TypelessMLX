@@ -21,8 +21,8 @@ usage() {
 Usage: $0 [--dev|--release] [--install|-i] [--allow-adhoc] [--no-models]
 
 Modes:
-  (default)   Dev mode — debug binary, no venv bundle, no DMG. Fast iteration.
-  --release   Release mode — release binary, bundle venv, create DMG + model zips.
+  (default)   Dev mode — debug binary, no DMG. Fast iteration.
+  --release   Release mode — release binary, create DMG + model zips.
 
 Options:
   --install, -i   Copy app to /Applications and launch after build.
@@ -118,15 +118,16 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BINARY_SRC" "$APP_BUNDLE/Contents/MacOS/TypelessMLX"
 cp "TypelessMLX/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
-mkdir -p "$APP_BUNDLE/Contents/Resources/backend"
-cp backend/convert.py "$APP_BUNDLE/Contents/Resources/backend/"
-cp backend/requirements.txt "$APP_BUNDLE/Contents/Resources/backend/"
-echo "  ✅ Backend resources copied"
-
 if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     echo "  ✅ App icon copied"
 fi
+
+echo "  🔧 Preparing MLX Metal library..."
+MLX_METALLIB=$("$PROJECT_DIR/scripts/build-mlx-metallib.sh" | tail -n 1)
+cp "$MLX_METALLIB" "$APP_BUNDLE/Contents/MacOS/mlx.metallib"
+cp "$MLX_METALLIB" "$APP_BUNDLE/Contents/Resources/mlx.metallib"
+echo "  ✅ MLX Metal library copied"
 
 printf 'APPL????' > "$APP_BUNDLE/Contents/PkgInfo"
 

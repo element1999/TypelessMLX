@@ -82,7 +82,7 @@ class AppState: ObservableObject {
         MLXModel(
             id: "macos-speech",
             repoOrPath: "",
-            description: "macOS 内置语音识别（快速、无需下载、无需 Python）",
+            description: "macOS 内置语音识别（快速、无需下载）",
             isLocal: true, modelType: "macos"
         ),
         MLXModel(
@@ -121,7 +121,7 @@ class AppState: ObservableObject {
         Self.availableModels.first { $0.id == selectedModelID } ?? Self.availableModels[0]
     }
 
-    /// Resolved model path or HF repo for Python backend
+    /// Resolved model path or HF repo for native ASR backends.
     var resolvedModelPath: String {
         let model = selectedModel
         if model.isLocal { return model.repoOrPath }
