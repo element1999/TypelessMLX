@@ -119,25 +119,9 @@ cp "$BINARY_SRC" "$APP_BUNDLE/Contents/MacOS/TypelessMLX"
 cp "TypelessMLX/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
 mkdir -p "$APP_BUNDLE/Contents/Resources/backend"
-cp backend/translate_server.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/convert.py "$APP_BUNDLE/Contents/Resources/backend/"
 cp backend/requirements.txt "$APP_BUNDLE/Contents/Resources/backend/"
-echo "  ✅ Python backend copied"
-
-if [ "$MODE" = "release" ]; then
-    echo "  🦀 Building asr-server (Rust + MLX)..."
-    ASR_RS_DIR="$PROJECT_DIR/vendor/qwen3_asr_rs"
-    if [ -d "$ASR_RS_DIR" ]; then
-        (cd "$ASR_RS_DIR" && source "$HOME/.cargo/env" && cargo build --release --no-default-features --features mlx 2>&1 | tail -3)
-        mkdir -p "$APP_BUNDLE/Contents/Resources/bin"
-        cp "$ASR_RS_DIR/target/release/asr-server" "$APP_BUNDLE/Contents/Resources/bin/"
-        chmod +x "$APP_BUNDLE/Contents/Resources/bin/asr-server"
-        echo "  ✅ asr-server bundled ($(du -sh "$APP_BUNDLE/Contents/Resources/bin/asr-server" | awk '{print $1}'))"
-    else
-        echo "  ❌ vendor/qwen3_asr_rs not found"
-        exit 1
-    fi
-fi
+echo "  ✅ Backend resources copied"
 
 if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
