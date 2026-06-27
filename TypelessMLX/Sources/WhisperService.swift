@@ -31,13 +31,25 @@ actor WhisperService {
         logInfo("WhisperService", "Transcribing \(url.lastPathComponent) with variant '\(variant)'")
 
         var options = DecodingOptions()
+        options.task = .transcribe
+        options.temperature = 0
+        options.temperatureIncrementOnFallback = 0
+        options.temperatureFallbackCount = 0
+        options.withoutTimestamps = true
+        options.wordTimestamps = false
+        options.skipSpecialTokens = true
+        options.suppressBlank = true
+        options.logProbThreshold = -0.8
+        options.compressionRatioThreshold = 2.0
         if let lang = language, !lang.isEmpty, lang != "auto" {
             options.language = lang
+            options.detectLanguage = false
         }
 
         let results = try await wk.transcribe(audioPath: url.path, decodeOptions: options)
-        let text = results.map { $0.text }.joined()
+        let rawText = results.map { $0.text }.joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        let text = sanitizeWhisperOutput(rawText)
 
         logInfo("WhisperService", "Transcription (\(text.count) chars): \(text.prefix(80))")
         return text
@@ -276,5 +288,28 @@ actor WhisperService {
     private func whisperError(_ message: String) -> NSError {
         NSError(domain: "WhisperService", code: -1,
                 userInfo: [NSLocalizedDescriptionKey: message])
+    }
+
+    private func sanitizeWhisperOutput(_ text: String) -> String {
+        var cleaned = text
+        let patterns = [
+            #"\[(?:\s*[A-Z_\- ]{2,40}\s*)\]"#,
+            #"\*\s*(?:whisper|music|applause|laughter|silence|noise|blank_audio)\s*\*"#
+        ]
+
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let range = NSRange(cleaned.startIndex..<cleaned.endIndex, in: cleaned)
+                cleaned = regex.stringByReplacingMatches(in: cleaned, options: [], range: range, withTemplate: " ")
+            }
+        }
+
+        cleaned = cleaned.replacingOccurrences(of: "\n", with: " ")
+        cleaned = cleaned.replacingOccurrences(of: "\t", with: " ")
+        cleaned = cleaned.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        let hasWord = cleaned.range(of: #"[\p{L}\p{N}]"#, options: .regularExpression) != nil
+        return hasWord ? cleaned : ""
     }
 }

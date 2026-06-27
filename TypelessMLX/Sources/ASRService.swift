@@ -21,19 +21,26 @@ actor ASRService {
     /// Transcribes the WAV file at `url`. For voice dictation via HotkeyManager.
     func transcribe(url: URL, language: String? = nil) async throws -> String {
         let (samples, sampleRate) = try loadAudio(from: url)
-        return try await transcribe(audio: samples, sampleRate: sampleRate, language: language)
+        let request = await dictationModelRequest()
+        return try await transcribe(audio: samples, sampleRate: sampleRate, language: language, request: request)
     }
 
     /// Transcribes raw PCM samples. For subtitle streaming via MeetingCaptureEngine.
     func transcribe(audio: [Float], sampleRate: Int = 16000, language: String? = nil) async throws -> String {
-        let selectedModel = await MainActor.run { AppState.shared.selectedModel }
-        let requestedModelId = selectedModel.repoOrPath
-        let localSnapshotPath = resolveLocalSnapshotPath(requestedModelId)
-        let modelKey = localSnapshotPath ?? requestedModelId
+        let request = subtitleModelRequest()
+        return try await transcribe(audio: audio, sampleRate: sampleRate, language: language, request: request)
+    }
+
+    private func transcribe(
+        audio: [Float],
+        sampleRate: Int,
+        language: String?,
+        request: ModelLoadRequest
+    ) async throws -> String {
         let loaded = try await loadedModel(
-            modelKey: modelKey,
-            requestedModelId: requestedModelId,
-            localSnapshotPath: localSnapshotPath
+            modelKey: request.modelKey,
+            requestedModelId: request.requestedModelId,
+            localSnapshotPath: request.localSnapshotPath
         )
         let lang = (language?.isEmpty == false && language != "auto") ? language : nil
         let device = preferredMLXDevice()
@@ -43,6 +50,43 @@ actor ASRService {
                 loaded.transcribe(audio: audio, sampleRate: sampleRate, language: lang)
             }
         }.value
+    }
+
+    private struct ModelLoadRequest {
+        let requestedModelId: String
+        let localSnapshotPath: String?
+        let modelKey: String
+    }
+
+    private func dictationModelRequest() async -> ModelLoadRequest {
+        let selectedModel = await MainActor.run { AppState.shared.selectedModel }
+        let requestedModelId = selectedModel.repoOrPath
+        let localSnapshotPath = resolveLocalSnapshotPath(requestedModelId)
+        return ModelLoadRequest(
+            requestedModelId: requestedModelId,
+            localSnapshotPath: localSnapshotPath,
+            modelKey: localSnapshotPath ?? requestedModelId
+        )
+    }
+
+    private func subtitleModelRequest() -> ModelLoadRequest {
+        let fallbackRepo = "mlx-community/Qwen3-ASR-0.6B-8bit"
+        guard let subtitleModel = AppState.availableModels.first(where: { $0.id == "qwen3-asr-0.6b" }) else {
+            let localSnapshotPath = resolveLocalSnapshotPath(fallbackRepo)
+            return ModelLoadRequest(
+                requestedModelId: fallbackRepo,
+                localSnapshotPath: localSnapshotPath,
+                modelKey: localSnapshotPath ?? fallbackRepo
+            )
+        }
+
+        let requestedModelId = AppState.bundledModelPath(for: subtitleModel) ?? subtitleModel.repoOrPath
+        let localSnapshotPath = resolveLocalSnapshotPath(requestedModelId)
+        return ModelLoadRequest(
+            requestedModelId: requestedModelId,
+            localSnapshotPath: localSnapshotPath,
+            modelKey: localSnapshotPath ?? requestedModelId
+        )
     }
 
     /// Releases the loaded model.

@@ -135,6 +135,22 @@ if [ -d "$TOKENIZER_RESOURCES" ]; then
     fi
 fi
 
+SILERO_VAD_RESOURCES="$PROJECT_DIR/TypelessMLX/Resources/silero-vad/Silero-VAD-v5-MLX"
+if [ -d "$SILERO_VAD_RESOURCES" ]; then
+    mkdir -p "$APP_BUNDLE/Contents/Resources/silero-vad/Silero-VAD-v5-MLX"
+    cp -R "$SILERO_VAD_RESOURCES/." "$APP_BUNDLE/Contents/Resources/silero-vad/Silero-VAD-v5-MLX/"
+fi
+
+if [ ! -s "$APP_BUNDLE/Contents/Resources/silero-vad/Silero-VAD-v5-MLX/config.json" ] || \
+   [ ! -s "$APP_BUNDLE/Contents/Resources/silero-vad/Silero-VAD-v5-MLX/model.safetensors" ]; then
+    echo "⚠️  Silero VAD resources are missing. Run scripts/download-silero-vad.sh before packaging."
+    if [ "$MODE" = "release" ]; then
+        exit 1
+    fi
+else
+    echo "  ✅ Silero VAD resources copied"
+fi
+
 if [ -f "$PROJECT_DIR/icon/AppIcon.icns" ]; then
     cp "$PROJECT_DIR/icon/AppIcon.icns" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
     echo "  ✅ App icon copied"
