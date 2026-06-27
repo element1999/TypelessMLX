@@ -375,6 +375,21 @@ class HotkeyManager {
             if appState.selectedModel.modelType == "macos" {
                 logInfo("HotkeyManager", "Using macOS built-in ASR")
                 SpeechStreamer.shared.transcribe(audioURL: audioURL, language: language, completion: handleResult)
+            } else if appState.selectedModel.modelType == "whisper" {
+                let modelID = appState.selectedModel.id
+                logInfo("HotkeyManager", "Using WhisperKit. Model: \(modelID)")
+                Task {
+                    do {
+                        let text = try await WhisperService.shared.transcribe(
+                            url: audioURL,
+                            modelID: modelID,
+                            language: language
+                        )
+                        handleResult(.success(text))
+                    } catch {
+                        handleResult(.failure(error))
+                    }
+                }
             } else {
                 let model = appState.resolvedModelPath
                 logInfo("HotkeyManager", "Sending to WhisperBridge. Model: \(model.split(separator: "/").last ?? Substring(model))")

@@ -6,6 +6,9 @@ let package = Package(
     platforms: [
         .macOS(.v13)
     ],
+    dependencies: [
+        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "1.0.0"),
+    ],
     targets: [
         .target(
             name: "TypelessMLXAudioTapSupport",
@@ -20,7 +23,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "TypelessMLX",
-            dependencies: ["TypelessMLXAudioTapSupport", "TypelessMLXAudioInputSupport"],
+            dependencies: [
+                "TypelessMLXAudioTapSupport",
+                "TypelessMLXAudioInputSupport",
+                .product(name: "WhisperKit", package: "WhisperKit"),
+            ],
             path: "TypelessMLX/Sources",
             linkerSettings: [
                 .linkedFramework("Cocoa"),
