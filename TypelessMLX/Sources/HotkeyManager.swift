@@ -359,7 +359,6 @@ class HotkeyManager {
                     do {
                         let text = try await WhisperService.shared.transcribe(
                             url: audioURL,
-                            modelID: modelID,
                             language: language
                         )
                         handleResult(.success(text))

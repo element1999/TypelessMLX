@@ -13,9 +13,6 @@ let package = Package(
         .package(url: "https://github.com/genericgroup/sherpa-onnx-spm", exact: "1.0.4"),
         .package(url: "https://github.com/soniqo/speech-swift", exact: "0.0.20"),
     ],
-    dependencies: [
-        .package(url: "https://github.com/argmaxinc/WhisperKit", from: "1.0.0"),
-    ],
     targets: [
         .target(
             name: "TypelessMLXAudioTapSupport",
