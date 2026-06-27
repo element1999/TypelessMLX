@@ -212,29 +212,6 @@ class HotkeyManager {
         recordingStartTime = Date()
         lock.unlock()
 
-        // If bridge was stopped by idle timer, restart it first
-        let modelType = appState.selectedModel.modelType
-        if modelType != "macos", !appState.hasPythonBackend {
-            if appState.showFloatingOverlay {
-                overlay?.show(text: "⏳ 加载模型中...", isRecording: false)
-            }
-            lock.lock()
-            isRecording = false
-            isProcessing = false
-            lock.unlock()
-            WhisperBridge.shared.start { [weak self] success in
-                DispatchQueue.main.async {
-                    AppState.shared.hasPythonBackend = success
-                    if success {
-                        self?.startRecording()
-                    } else {
-                        self?.overlay?.hide()
-                    }
-                }
-            }
-            return
-        }
-
         appState.setStatus(.recording)
         appState.liveTranscriptionConfirmedText = ""
         appState.liveTranscriptionUnconfirmedText = ""
@@ -391,9 +368,26 @@ class HotkeyManager {
                     }
                 }
             } else {
-                let model = appState.resolvedModelPath
-                logInfo("HotkeyManager", "Sending to WhisperBridge. Model: \(model.split(separator: "/").last ?? Substring(model))")
-                WhisperBridge.shared.transcribe(audioURL: audioURL, model: model, language: language, completion: handleResult)
+                let model = appState.selectedModel
+                let modelType = model.modelType
+                logInfo("HotkeyManager", "Transcribing with \(modelType) model: \(model.repoOrPath.split(separator: "/").last ?? "")")
+                Task { [weak self] in
+                    guard self != nil else { return }
+                    do {
+                        let text: String
+                        switch modelType {
+                        case "qwen3":
+                            text = try await ASRService.shared.transcribe(url: audioURL, language: language)
+                        case "whisper":
+                            text = try await WhisperService.shared.transcribe(url: audioURL, language: language)
+                        default:
+                            return  // macOS model handled above
+                        }
+                        await MainActor.run { handleResult(.success(text)) }
+                    } catch {
+                        await MainActor.run { handleResult(.failure(error)) }
+                    }
+                }
             }
         }
     }

@@ -92,16 +92,51 @@ class OCRManager: NSObject {
 
         // Wait one runloop so the overlay windows finish closing
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            guard let image = CGWindowListCreateImage(
-                cgRect,
-                .optionOnScreenOnly,
-                kCGNullWindowID,
-                .bestResolution
-            ) else {
-                logError("OCRManager", "CGWindowListCreateImage returned nil")
-                return
+            // Find which display contains the selection rect
+            var displayID = CGMainDisplayID()
+            var displayCount: UInt32 = 0
+            CGGetDisplaysWithRect(cgRect, 1, &displayID, &displayCount)
+            if displayCount == 0 { displayID = CGMainDisplayID() }
+
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                do {
+                    // Capture the full display via SCScreenshotManager (CGWindowListCreateImage removed in macOS 15)
+                    let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
+                    guard let display = content.displays.first(where: { $0.displayID == displayID })
+                            ?? content.displays.first else {
+                        logError("OCRManager", "No display found for displayID \(displayID)")
+                        return
+                    }
+                    let filter = SCContentFilter(display: display, excludingWindows: [])
+                    let config = SCStreamConfiguration()
+                    config.showsCursor = false
+                    let fullImage = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
+
+                    // Convert global CG rect (top-left origin, Y downward) to display-local pixel coords.
+                    // CGImage.cropping(to:) uses bottom-left origin, so we flip Y.
+                    let displayBounds = CGDisplayBounds(displayID)
+                    let scaleX = CGFloat(fullImage.width) / displayBounds.width
+                    let scaleY = CGFloat(fullImage.height) / displayBounds.height
+                    let localPtX = cgRect.origin.x - displayBounds.origin.x
+                    let localPtY = cgRect.origin.y - displayBounds.origin.y
+                    let pixX = localPtX * scaleX
+                    let pixY = localPtY * scaleY
+                    let pixW = cgRect.width * scaleX
+                    let pixH = cgRect.height * scaleY
+                    // Flip Y: CGImage row-0 is top of display; cropping coordinate origin is bottom-left
+                    let cropRect = CGRect(x: pixX, y: CGFloat(fullImage.height) - pixY - pixH,
+                                          width: pixW, height: pixH)
+
+                    guard let image = fullImage.cropping(to: cropRect) else {
+                        logError("OCRManager", "Failed to crop image to \(cropRect)")
+                        return
+                    }
+                    self.runOCR(image: image)
+                } catch {
+                    logError("OCRManager", "Screen capture failed: \(error)")
+                }
             }
-            self?.runOCR(image: image)
         }
     }
 

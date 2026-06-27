@@ -1,0 +1,29 @@
+{
+  "model_type": "silero_vad_v5",
+  "sample_rate": 16000,
+  "chunk_size": 512,
+  "context_size": 64,
+  "filter_length": 256,
+  "hop_length": 128,
+  "encoder_channels": [
+    129,
+    128,
+    64,
+    64,
+    128
+  ],
+  "encoder_kernel_sizes": [
+    3,
+    3,
+    3,
+    3
+  ],
+  "encoder_strides": [
+    1,
+    2,
+    2,
+    1
+  ],
+  "lstm_hidden_size": 128,
+  "lstm_num_layers": 1
+}

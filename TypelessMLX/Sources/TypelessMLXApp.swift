@@ -1,5 +1,6 @@
 import SwiftUI
 import AVFoundation
+import MLX
 
 @main
 struct TypelessMLXApp: App {
@@ -21,6 +22,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         installCrashHandler()
         logInfo("App", "TypelessMLX launching...")
+        prewarmMLXRuntime()
 
         // Menu bar only app — no Dock icon
         NSApp.setActivationPolicy(.accessory)
@@ -35,9 +37,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         SpeechStreamer.requestAuthorization { granted in
             logInfo("App", "Speech recognition authorization: \(granted)")
         }
-
-        // Check if Python venv is ready; if not, show setup
-        checkBackendAndSetup()
 
         // Setup hotkey (works even before permissions are fully granted)
         HotkeyManager.shared.setup(appState: appState)
@@ -62,11 +61,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         logInfo("App", "TypelessMLX launch complete")
     }
 
+    private func prewarmMLXRuntime() {
+        logInfo("App", "Prewarming MLX runtime on main thread...")
+        let hasMetallib = hasBundledMLXMetallib()
+        let deviceLabel = hasMetallib ? "gpu" : "cpu"
+        if !hasMetallib {
+            logInfo("App", "MLX metallib not bundled; using CPU device to avoid Metal loader abort")
+        }
+        let warmup = Device.withDefaultDevice(hasMetallib ? .gpu : .cpu) {
+            MLXArray.zeros([1])
+        }
+        logInfo("App", "MLX runtime prewarmed on \(deviceLabel): shape=\(warmup.shape)")
+    }
+
+    private func hasBundledMLXMetallib() -> Bool {
+        let bundle = Bundle.main
+        let candidates = [
+            bundle.bundleURL.appendingPathComponent("Contents/MacOS/mlx.metallib"),
+            bundle.resourceURL?.appendingPathComponent("mlx.metallib"),
+            bundle.resourceURL?.appendingPathComponent("default.metallib"),
+        ].compactMap { $0 }
+        return candidates.contains { FileManager.default.fileExists(atPath: $0.path) }
+    }
+
     func applicationWillTerminate(_ notification: Notification) {
         permissionCheckTimer?.invalidate()
         logInfo("App", "TypelessMLX shutting down")
         AudioRecorder.shared.forceReset()
-        WhisperBridge.shared.stopProcess()
         MeetingCaptureEngine.shared.stop()
     }
 
@@ -134,24 +155,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // If subtitle is enabled but stream not active, retry (e.g. after granting screen capture)
             if self.appState.meetingSubtitleEnabled && !self.appState.isTeamsMeetingActive {
                 MeetingCaptureEngine.shared.setEnabled(true)
-            }
-        }
-    }
-
-    private func checkBackendAndSetup() {
-        if WhisperBridge.isVenvReady() {
-            logInfo("App", "Python venv ready — starting WhisperBridge")
-            WhisperBridge.shared.start { [weak self] success in
-                self?.appState.hasPythonBackend = success
-                self?.appState.updatePermissionState()
-                logInfo("App", "WhisperBridge started: \(success)")
-            }
-        } else {
-            logInfo("App", "Python venv not ready — showing setup")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                SetupWindowController.shared.show {
-                    logInfo("App", "Setup complete")
-                }
             }
         }
     }

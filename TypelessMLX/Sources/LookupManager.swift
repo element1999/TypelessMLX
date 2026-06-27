@@ -71,41 +71,20 @@ class LookupManager {
             ov.show(word: word, near: pt)
         }
 
-        performLookup(word: word, retryOnNotReady: true)
-    }
-
-    private func performLookup(word: String, retryOnNotReady: Bool) {
-        WhisperBridge.shared.lookup(text: word,
-                                    textModel: AppState.shared.resolvedTextModelPath) { [weak self] result in
-            switch result {
-            case .success(let entry):
-                logInfo("LookupManager", "lookup result: \(entry.prefix(60))")
-                DispatchQueue.main.async { self?.overlay?.setContent(entry) }
-            case .failure(let error):
-                let message = error.localizedDescription
-                logWarn("LookupManager", "lookup failed: \(message)")
-                if retryOnNotReady, message.localizedCaseInsensitiveContains("not ready") {
-                    DispatchQueue.main.async {
-                        self?.overlay?.setContent("后端启动中，正在重试…")
-                    }
-                    WhisperBridge.shared.start { [weak self] success in
-                        DispatchQueue.main.async {
-                            AppState.shared.hasPythonBackend = success
-                            AppState.shared.updatePermissionState()
-                            guard success else {
-                                self?.overlay?.setContent("后端未就绪，请稍后重试")
-                                return
-                            }
-                            DispatchQueue.main.asyncAfter(deadline: .now() + (self?.autoRetryDelay ?? 0.8)) {
-                                self?.performLookup(word: word, retryOnNotReady: false)
-                            }
-                        }
-                    }
-                } else {
-                    DispatchQueue.main.async {
-                        self?.overlay?.setContent("查询失败：\(message)")
+        Task { [weak self] in
+            guard let self = self else { return }
+            do {
+                let entry = try await LLMService.shared.lookup(word)
+                await MainActor.run {
+                    if entry.isEmpty {
+                        self.overlay?.setContent("无结果")
+                    } else {
+                        self.overlay?.setContent(entry)
                     }
                 }
+            } catch {
+                logError("LookupManager", "lookup failed: \(error)")
+                await MainActor.run { self.overlay?.setContent("查询失败") }
             }
         }
     }

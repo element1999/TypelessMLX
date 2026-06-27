@@ -115,11 +115,6 @@ struct GeneralSettingsTab: View {
                     Spacer()
                     PermissionBadge(granted: AXIsProcessTrusted())
                 }
-                HStack {
-                    Text("Python 后端")
-                    Spacer()
-                    PermissionBadge(granted: appState.hasPythonBackend)
-                }
                 Button("打开系统设置") {
                     NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy")!)
                 }
@@ -404,13 +399,6 @@ struct ModelSettingsTab: View {
                 }
 }
 
-            Section {
-                Button("打开设置与安装窗口") {
-                    SetupWindowController.shared.show()
-                }
-                .buttonStyle(.link)
-                .help("安装 Python 环境")
-            }
         }
         .formStyle(.grouped)
     }

@@ -1,4 +1,5 @@
 import Foundation
+import HuggingFace
 
 /// Manages on-disk cache for MLX models (HuggingFace Hub + local converted models).
 class ModelManager: ObservableObject {
@@ -9,7 +10,7 @@ class ModelManager: ObservableObject {
     @Published var downloadError: String? = nil
     @Published var cachedSizes: [String: Int64] = [:]  // modelID → bytes, 0 = not cached
 
-    private var downloadProcess: Process?
+    private var downloadTask: Task<Void, Never>?
     private let queue = DispatchQueue(label: "com.typelessmlx.modelmanager", qos: .utility)
 
     private init() {
@@ -49,7 +50,7 @@ class ModelManager: ObservableObject {
 
     func download(_ model: MLXModel) {
         guard downloadingModelID == nil else { return }
-        guard !model.isLocal else { return }  // local models use SetupWindowController
+        guard !model.isLocal else { return }  // local models don't need downloading
 
         DispatchQueue.main.async {
             self.downloadingModelID = model.id
@@ -58,56 +59,31 @@ class ModelManager: ObservableObject {
         }
         logInfo("ModelManager", "Starting download: \(model.repoOrPath)")
 
-        queue.async { [weak self] in
+        downloadTask = Task { [weak self] in
             guard let self = self else { return }
-            let python = WhisperBridge.shared.pythonPath
-            let script = """
-import sys, os
-os.environ['HF_HOME'] = os.path.expanduser('~/.cache/huggingface')
-from huggingface_hub import snapshot_download
-snapshot_download('\(model.repoOrPath)')
-print('DONE')
-sys.stdout.flush()
-"""
-            let proc = Process()
-            proc.executableURL = URL(fileURLWithPath: python)
-            proc.arguments = ["-c", script]
-            proc.environment = WhisperBridge.makeEnv()
-
-            let outPipe = Pipe()
-            let errPipe = Pipe()
-            proc.standardOutput = outPipe
-            proc.standardError = errPipe
-
-            errPipe.fileHandleForReading.readabilityHandler = { [weak self] handle in
-                let data = handle.availableData
-                if !data.isEmpty, let text = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
-                    logDebug("ModelManager", text)
-                    // Parse "Fetching N files: X%|..." progress from huggingface_hub
-                    if text.contains("Fetching") || text.contains("Downloading") {
-                        let status: String
-                        if let range = text.range(of: #"(\d+)/(\d+)"#, options: .regularExpression) {
-                            status = "下载中 \(text[range]) 个文件..."
-                        } else if text.contains("%") {
-                            status = "下载中..."
-                        } else {
-                            status = "下载中..."
-                        }
-                        DispatchQueue.main.async { self?.downloadStatusText = status }
-                    }
+            var success = false
+            do {
+                let repo = try Self.repoID(from: model.repoOrPath)
+                let client = Self.hubClient()
+                let matching = Self.matchingGlobs(for: model)
+                _ = try await client.downloadSnapshot(
+                    of: repo,
+                    matching: matching,
+                    maxConcurrentDownloads: 4
+                ) { [weak self] progress in
+                    self?.downloadStatusText = Self.progressText(progress)
+                }
+                success = true
+            } catch {
+                if Task.isCancelled { return }
+                if self.hasCachedWhisperKitCoreMLModel(model) {
+                    success = true
+                    logWarn("ModelManager", "Download returned an error, but required WhisperKit CoreML files are present; treating as cached: \(model.id). Error: \(error)")
+                } else {
+                    logError("ModelManager", "Download error: \(error)")
                 }
             }
 
-            self.downloadProcess = proc
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-            } catch {
-                logError("ModelManager", "Download process error: \(error)")
-            }
-
-            errPipe.fileHandleForReading.readabilityHandler = nil
-            let success = proc.terminationStatus == 0
             logInfo("ModelManager", "Download \(success ? "succeeded" : "failed") for \(model.id)")
 
             // Compute disk size on background thread to avoid blocking main thread
@@ -116,7 +92,7 @@ sys.stdout.flush()
                 guard let self = self else { return }
                 self.downloadingModelID = nil
                 self.downloadStatusText = ""
-                self.downloadProcess = nil
+                self.downloadTask = nil
                 self.cachedSizes[model.id] = size
                 self.downloadError = success ? nil : "下载失败：\(model.id)"
             }
@@ -124,8 +100,8 @@ sys.stdout.flush()
     }
 
     func cancelDownload() {
-        downloadProcess?.terminate()
-        downloadProcess = nil
+        downloadTask?.cancel()
+        downloadTask = nil
         DispatchQueue.main.async {
             self.downloadingModelID = nil
             self.downloadError = nil
@@ -141,6 +117,41 @@ sys.stdout.flush()
             logInfo("ModelManager", "Deleted cache: \(cacheURL.lastPathComponent)")
         }
         DispatchQueue.main.async { self.cachedSizes[model.id] = 0 }
+    }
+
+    // MARK: - HuggingFace downloads
+
+    private static func repoID(from value: String) throws -> Repo.ID {
+        guard let repo = Repo.ID(rawValue: value) else {
+            throw NSError(domain: "ModelManager", code: -1,
+                          userInfo: [NSLocalizedDescriptionKey: "Invalid HuggingFace repo: \(value)"])
+        }
+        return repo
+    }
+
+    private static func hubClient() -> HubClient {
+        let cache = HubCache(cacheDirectory: FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".cache/huggingface/hub"))
+        let hostString = ProcessInfo.processInfo.environment["HF_ENDPOINT"] ?? "https://hf-mirror.com"
+        let host = URL(string: hostString) ?? HubClient.defaultHost
+        return HubClient(host: host, userAgent: "TypelessMLX", cache: cache)
+    }
+
+    private static func matchingGlobs(for model: MLXModel) -> [String] {
+        guard model.modelType == "whisper", let variant = AppState.whisperKitVariant(for: model.id) else {
+            return []
+        }
+        return WhisperService.requiredWhisperKitDownloadFiles(for: variant).map { "\(variant)/\($0)" }
+    }
+
+    private static func progressText(_ progress: Progress) -> String {
+        let completed = progress.completedUnitCount
+        let total = progress.totalUnitCount
+        if total > 0 {
+            let percent = Int((Double(completed) / Double(total)) * 100)
+            return "下载中 \(percent)%..."
+        }
+        return "下载中..."
     }
 
     // MARK: - Paths
@@ -159,11 +170,42 @@ sys.stdout.flush()
             .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)")
     }
 
+    private func cachedWhisperKitModelFolder(for model: MLXModel) -> URL? {
+        guard model.modelType == "whisper",
+              let variant = AppState.whisperKitVariant(for: model.id),
+              let dir = cacheDirectory(for: model) else { return nil }
+        let snapshots = dir.appendingPathComponent("snapshots")
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { return nil }
+
+        return names
+            .map { snapshots.appendingPathComponent($0).appendingPathComponent(variant) }
+            .filter { WhisperService.hasWhisperKitCoreMLFiles(in: $0) }
+            .max { lhs, rhs in
+                let lDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                let rDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+                return lDate < rDate
+            }
+    }
+
+    private func hasCachedWhisperKitCoreMLModel(_ model: MLXModel) -> Bool {
+        cachedWhisperKitModelFolder(for: model) != nil
+    }
+
     private func diskSize(for model: MLXModel) -> Int64 {
         guard let dir = cacheDirectory(for: model) else { return 0 }
         if model.isLocal {
             guard FileManager.default.fileExists(atPath: dir.path) else { return 0 }
             return directorySize(dir)
+        }
+        if model.modelType == "whisper", let variant = AppState.whisperKitVariant(for: model.id) {
+            let snapshots = dir.appendingPathComponent("snapshots")
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { return 0 }
+            let size = names.reduce(Int64(0)) { total, name in
+                let variantDir = snapshots.appendingPathComponent(name).appendingPathComponent(variant)
+                guard FileManager.default.fileExists(atPath: variantDir.path) else { return total }
+                return max(total, directorySize(variantDir))
+            }
+            return size > 1024 ? size : 0
         }
         // HF Hub stores actual files in blobs/ (snapshots/ only has symlinks)
         let blobs = dir.appendingPathComponent("blobs")
@@ -180,9 +222,19 @@ sys.stdout.flush()
         ) else { return 0 }
         var total: Int64 = 0
         for case let fileURL as URL in enumerator {
-            let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0
-            total += Int64(size)
+            total += fileSizeFollowingSymlink(fileURL)
         }
         return total
+    }
+
+    private func fileSizeFollowingSymlink(_ url: URL) -> Int64 {
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isSymbolicLinkKey])
+        if values?.isSymbolicLink == true,
+           let destination = try? FileManager.default.destinationOfSymbolicLink(atPath: url.path) {
+            let resolved = URL(fileURLWithPath: destination, relativeTo: url.deletingLastPathComponent()).standardizedFileURL
+            let size = (try? resolved.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            return Int64(size)
+        }
+        return Int64(values?.fileSize ?? 0)
     }
 }
