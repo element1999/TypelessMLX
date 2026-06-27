@@ -692,6 +692,17 @@ class WhisperBridge {
         if env["HF_ENDPOINT"] == nil {
             env["HF_ENDPOINT"] = "https://hf-mirror.com"
         }
+        // Corporate CA certificate — prefer the in-app setting, fall back to
+        // NODE_EXTRA_CA_CERTS (only present when launched from a shell).
+        let certPath = AppState.shared.customCACertPath.trimmingCharacters(in: .whitespaces)
+        let cert = !certPath.isEmpty ? certPath : (env["NODE_EXTRA_CA_CERTS"] ?? "")
+        if !cert.isEmpty {
+            let expanded = (cert as NSString).expandingTildeInPath
+            env["SSL_CERT_FILE"] = expanded       // Python ssl / urllib / requests
+            env["REQUESTS_CA_BUNDLE"] = expanded  // huggingface_hub
+            env["CURL_CA_BUNDLE"] = expanded      // curl
+            env["UV_CERT"] = expanded             // uv (uses rustls, ignores SSL_CERT_FILE)
+        }
         return env
     }
 }

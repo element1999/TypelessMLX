@@ -91,6 +91,19 @@ struct GeneralSettingsTab: View {
                 Toggle("Python 后端常驻（不因空闲自动停止）", isOn: $appState.keepBackendAlive)
             }
 
+            Section("网络") {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("CA 证书路径")
+                    Spacer()
+                    TextField("~/combined_cert.pem", text: $appState.customCACertPath)
+                        .textFieldStyle(.roundedBorder)
+                        .frame(width: 260)
+                }
+                Text("企业内网证书路径（PEM 格式）。填写后需先将证书导入系统钥匙串：\nsudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain <证书路径>")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+
             Section("权限状态") {
                 HStack {
                     Text("麦克风")

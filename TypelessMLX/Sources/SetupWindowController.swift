@@ -122,24 +122,64 @@ class SetupViewModel: ObservableObject {
         let venvPath = NSHomeDirectory() + "/.local/share/typelessmlx/venv"
         let requirementsPath = findRequirementsPath()
 
-        guard let uvPath = findUv() else {
-            appendLog("   ❌ 未找到 uv，请先安装: https://docs.astral.sh/uv/getting-started/installation/")
-            return false
+        var env = WhisperBridge.makeEnv()
+        let certPath = AppState.shared.customCACertPath.trimmingCharacters(in: .whitespaces)
+        let expandedCert = certPath.isEmpty ? "" : (certPath as NSString).expandingTildeInPath
+        if !expandedCert.isEmpty {
+            env["SSL_CERT_FILE"] = expandedCert
+            env["REQUESTS_CA_BUNDLE"] = expandedCert
         }
 
-        appendLog("   使用 uv 创建 venv（含 Python 3.12）...")
-        let venvOk = runCommand(uvPath, args: ["venv", venvPath, "--python", "3.12"],
-                                env: WhisperBridge.makeEnv())
-        guard venvOk else {
+        // Prefer a local Python 3.12 — avoids any uv network call (uv uses rustls which
+        // ignores SSL_CERT_FILE and custom CA certs on corporate networks).
+        if let python312 = findLocalPython312() {
+            appendLog("   找到本地 Python 3.12: \(python312)")
+            appendLog("   创建虚拟环境...")
+            guard runCommand(python312, args: ["-m", "venv", venvPath, "--clear"], env: env) else {
+                appendLog("   ❌ 创建 venv 失败")
+                return false
+            }
+            appendLog("   安装 Python 包...")
+            return runCommand(venvPath + "/bin/pip",
+                              args: ["install", "-r", requirementsPath ?? "requirements.txt"],
+                              env: env)
+        }
+
+        // No local Python 3.12 found — fall back to uv (requires network)
+        guard let uvPath = findUv() else {
+            appendLog("   ❌ 未找到 uv 且无本地 Python 3.12")
+            appendLog("   请安装：brew install python@3.12  或  https://docs.astral.sh/uv/")
+            return false
+        }
+        appendLog("   未找到本地 Python 3.12，使用 uv 下载...")
+        appendLog("   ⚠️  若证书报错，请先执行：brew install python@3.12")
+        guard runCommand(uvPath,
+                         args: ["venv", venvPath, "--python", "3.12", "--clear", "--system-certs"],
+                         env: env) else {
             appendLog("   ❌ 创建 venv 失败")
             return false
         }
-
         appendLog("   安装 Python 包...")
-        let python = venvPath + "/bin/python"
-        return runCommand(uvPath,
-                          args: ["pip", "install", "-p", python, "-r", requirementsPath ?? "requirements.txt"],
-                          env: WhisperBridge.makeEnv())
+        return runCommand(venvPath + "/bin/pip",
+                          args: ["install", "-r", requirementsPath ?? "requirements.txt"],
+                          env: env)
+    }
+
+    private func findLocalPython312() -> String? {
+        let fm = FileManager.default
+        // uv-managed Python cache
+        let uvCache = NSHomeDirectory() + "/.local/share/uv/python"
+        if let entries = try? fm.contentsOfDirectory(atPath: uvCache) {
+            for entry in entries.sorted().reversed() where entry.contains("cpython-3.12") {
+                let bin = uvCache + "/\(entry)/bin/python3.12"
+                if fm.fileExists(atPath: bin) { return bin }
+            }
+        }
+        // Homebrew / system
+        for path in ["/opt/homebrew/bin/python3.12", "/usr/local/bin/python3.12"] {
+            if fm.fileExists(atPath: path) { return path }
+        }
+        return nil
     }
 
     private func findUv() -> String? {
