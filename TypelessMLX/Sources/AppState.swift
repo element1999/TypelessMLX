@@ -75,6 +75,8 @@ class AppState: ObservableObject {
     @AppStorage("translateHotkeyModifiers") var translateHotkeyModifiers: Int = 6144
     @AppStorage("ocrHotkeyKeyCode")        var ocrHotkeyKeyCode: Int        = 31    // kVK_ANSI_O
     @AppStorage("ocrHotkeyModifiers")      var ocrHotkeyModifiers: Int      = 6144  // controlKey | optionKey
+    @AppStorage("snipPinHotkeyKeyCode")    var snipPinHotkeyKeyCode: Int    = 38    // kVK_ANSI_J
+    @AppStorage("snipPinHotkeyModifiers")  var snipPinHotkeyModifiers: Int  = 6144  // controlKey | optionKey
     // Live transcription text (set by ASR progress callbacks)
     @Published var liveTranscriptionConfirmedText: String = ""
     @Published var liveTranscriptionUnconfirmedText: String = ""
@@ -200,6 +202,10 @@ class AppState: ObservableObject {
         if isInvalidHotkey(ocrHotkeyKeyCode, ocrHotkeyModifiers) {
             ocrHotkeyKeyCode = 31  // O
             ocrHotkeyModifiers = defaultModifiers
+        }
+        if isInvalidHotkey(snipPinHotkeyKeyCode, snipPinHotkeyModifiers) {
+            snipPinHotkeyKeyCode = 38  // J
+            snipPinHotkeyModifiers = defaultModifiers
         }
     }
 

@@ -132,6 +132,12 @@ class StatusBarController: NSObject, NSMenuDelegate {
         ocrItem.target = self
         menu.addItem(ocrItem)
 
+        let snipPinLabel = HotkeyRecorderNSView.format(keyCode: appState.snipPinHotkeyKeyCode,
+                                                        modifiers: appState.snipPinHotkeyModifiers)
+        let snipPinItem = NSMenuItem(title: "截图并贴图  (\(snipPinLabel))", action: #selector(triggerSnipPin), keyEquivalent: "")
+        snipPinItem.target = self
+        menu.addItem(snipPinItem)
+
         // Last transcription
         if let lastEntry = appState.history.first {
             menu.addItem(NSMenuItem.separator())
@@ -227,6 +233,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
 
     @objc private func triggerOCR() {
         OCRManager.shared.startCapture()
+    }
+    @objc private func triggerSnipPin() {
+        SnipManager.shared.startPinCapture()
     }
 
     @objc private func toggleMeetingSubtitle() {

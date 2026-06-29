@@ -71,6 +71,14 @@ struct GeneralSettingsTab: View {
                                         modifiers: $appState.ocrHotkeyModifiers)
                         .frame(width: 110, height: 28)
                 }
+
+                HStack {
+                    Text("截图并贴图快捷键")
+                    Spacer()
+                    HotkeyRecorderField(keyCode: $appState.snipPinHotkeyKeyCode,
+                                        modifiers: $appState.snipPinHotkeyModifiers)
+                        .frame(width: 110, height: 28)
+                }
             }
 
             Section("录音设备") {

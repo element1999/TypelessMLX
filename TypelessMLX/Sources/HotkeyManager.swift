@@ -10,6 +10,7 @@ class HotkeyManager {
     private var lookupHotKeyRef: EventHotKeyRef?
     private var translateHotKeyRef: EventHotKeyRef?
     private var ocrHotKeyRef: EventHotKeyRef?
+    private var snipPinHotKeyRef: EventHotKeyRef?
     private var carbonHandlerInstalled = false
     private var lastLookupKeyCode = -1
     private var lastLookupModifiers = -1
@@ -17,6 +18,8 @@ class HotkeyManager {
     private var lastTranslateModifiers = -1
     private var lastOcrKeyCode = -1
     private var lastOcrModifiers = -1
+    private var lastSnipPinKeyCode = -1
+    private var lastSnipPinModifiers = -1
     private var isRecording = false
     private var recordingStartTime: Date?
     private var overlay: RecordingOverlay?
@@ -80,6 +83,7 @@ class HotkeyManager {
                 case 1: DispatchQueue.main.async { LookupManager.shared.lookup() }
                 case 2: DispatchQueue.main.async { TranslateManager.shared.translate() }
                 case 3: DispatchQueue.main.async { OCRManager.shared.startCapture() }
+                case 4: DispatchQueue.main.async { SnipManager.shared.startPinCapture() }
                 default: break
                 }
                 return noErr
@@ -94,6 +98,7 @@ class HotkeyManager {
         if let ref = lookupHotKeyRef    { UnregisterEventHotKey(ref); lookupHotKeyRef = nil }
         if let ref = translateHotKeyRef { UnregisterEventHotKey(ref); translateHotKeyRef = nil }
         if let ref = ocrHotKeyRef       { UnregisterEventHotKey(ref); ocrHotKeyRef = nil }
+        if let ref = snipPinHotKeyRef   { UnregisterEventHotKey(ref); snipPinHotKeyRef = nil }
 
         guard let appState = appState else { return }
 
@@ -103,10 +108,13 @@ class HotkeyManager {
         let tm  = appState.translateHotkeyModifiers
         let okc = appState.ocrHotkeyKeyCode
         let om  = appState.ocrHotkeyModifiers
+        let spkc = appState.snipPinHotkeyKeyCode
+        let spm  = appState.snipPinHotkeyModifiers
 
         lastLookupKeyCode    = lkc; lastLookupModifiers    = lm
         lastTranslateKeyCode = tkc; lastTranslateModifiers = tm
         lastOcrKeyCode       = okc; lastOcrModifiers       = om
+        lastSnipPinKeyCode   = spkc; lastSnipPinModifiers   = spm
 
         var lookupID = EventHotKeyID()
         lookupID.signature = 0x544C4D58
@@ -140,6 +148,17 @@ class HotkeyManager {
         } else {
             logError("HotkeyManager", "OCR hotkey registration failed: \(os)")
         }
+
+        var snipPinID = EventHotKeyID()
+        snipPinID.signature = 0x544C4D58
+        snipPinID.id = 4
+        let sps = RegisterEventHotKey(UInt32(spkc), UInt32(spm),
+                                      snipPinID, GetApplicationEventTarget(), 0, &snipPinHotKeyRef)
+        if sps == noErr {
+            logInfo("HotkeyManager", "Snip hotkey registered: kc=\(spkc) mods=\(spm)")
+        } else {
+            logError("HotkeyManager", "Snip hotkey registration failed: \(sps)")
+        }
     }
 
     @objc private func userDefaultsChanged() {
@@ -150,9 +169,12 @@ class HotkeyManager {
         let tm  = appState.translateHotkeyModifiers
         let okc = appState.ocrHotkeyKeyCode
         let om  = appState.ocrHotkeyModifiers
+        let spkc = appState.snipPinHotkeyKeyCode
+        let spm  = appState.snipPinHotkeyModifiers
         guard lkc != lastLookupKeyCode || lm != lastLookupModifiers ||
               tkc != lastTranslateKeyCode || tm != lastTranslateModifiers ||
-              okc != lastOcrKeyCode || om != lastOcrModifiers else { return }
+              okc != lastOcrKeyCode || om != lastOcrModifiers ||
+              spkc != lastSnipPinKeyCode || spm != lastSnipPinModifiers else { return }
         registerHotKeyBindings()
     }
 
@@ -423,6 +445,7 @@ class HotkeyManager {
         if let ref = lookupHotKeyRef { UnregisterEventHotKey(ref) }
         if let ref = translateHotKeyRef { UnregisterEventHotKey(ref) }
         if let ref = ocrHotKeyRef { UnregisterEventHotKey(ref) }
+        if let ref = snipPinHotKeyRef { UnregisterEventHotKey(ref) }
         NotificationCenter.default.removeObserver(self)
     }
 }
