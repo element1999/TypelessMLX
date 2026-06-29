@@ -10,11 +10,46 @@ class LLMService {
 
     private init() {}
 
-    func translate(_ text: String) async throws -> String {
+    enum TranslationTarget {
+        case chinese
+        case english
+
+        var displayName: String {
+            switch self {
+            case .chinese: return "简体中文"
+            case .english: return "English"
+            }
+        }
+    }
+
+    func translate(_ text: String, target: TranslationTarget = .chinese) async throws -> String {
         let c = try await loadedContainer()
         let session = ChatSession(c)
-        let prompt = "你是翻译助手。将下面的内容翻译为中文，如果原文已经是中文则翻译为英文。直接输出翻译结果，不要解释。\n原文：「\(text)」"
-        return try await session.respond(to: prompt)
+        let prompt = "你是翻译助手。请将原文翻译为\(target.displayName)。只输出翻译结果，不要解释，不要添加前后缀。\n原文：「\(text)」"
+        let raw = try await session.respond(to: prompt)
+        return sanitizeTranslationOutput(raw)
+    }
+
+    private func sanitizeTranslationOutput(_ text: String) -> String {
+        var result = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let quotePairs: [(Character, Character)] = [
+            ("\"", "\""),
+            ("'", "'"),
+            ("“", "”"),
+            ("‘", "’"),
+            ("「", "」"),
+            ("『", "』"),
+            ("《", "》"),
+            ("〈", "〉"),
+        ]
+
+        for _ in 0..<2 {
+            guard let first = result.first, let last = result.last, result.count >= 2 else { break }
+            guard quotePairs.contains(where: { $0.0 == first && $0.1 == last }) else { break }
+            result = String(result.dropFirst().dropLast()).trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+
+        return result
     }
 
     func lookup(_ word: String) async throws -> String {

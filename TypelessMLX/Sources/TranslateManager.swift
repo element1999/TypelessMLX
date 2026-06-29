@@ -42,7 +42,8 @@ class TranslateManager {
         Task { [weak self] in
             guard let self = self else { return }
             do {
-                let translation = try await LLMService.shared.translate(trimmed)
+                let target: LLMService.TranslationTarget = isChinese ? .english : .chinese
+                let translation = try await LLMService.shared.translate(trimmed, target: target)
                 await MainActor.run {
                     if translation.isEmpty {
                         self.overlay?.setContent("无结果")

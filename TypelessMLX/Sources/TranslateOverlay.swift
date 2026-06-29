@@ -8,8 +8,9 @@ class TranslateOverlay: NSObject {
 
     private var window: NSWindow?
     private var textView: NSTextView?
-    private var escMonitor: Any?
     private var clickMonitor: Any?
+    private var keyEventTap: CFMachPort?
+    private var keyEventRunLoopSource: CFRunLoopSource?
     private var dismissWork: DispatchWorkItem?
     private var currentContent = ""
 
@@ -57,7 +58,7 @@ class TranslateOverlay: NSObject {
     func dismiss() {
         dismissWork?.cancel()
         dismissWork = nil
-        if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
+        stopKeyboardEventTap()
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
         window?.orderOut(nil)
         window = nil
@@ -160,12 +161,75 @@ class TranslateOverlay: NSObject {
     // MARK: - Monitors & auto-dismiss
 
     private func registerMonitors() {
-        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.dismiss() }
-        }
+        startKeyboardEventTap()
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
             guard let self = self, let w = self.window else { return }
             if !w.frame.contains(NSEvent.mouseLocation) { self.dismiss() }
+        }
+    }
+
+    private func startKeyboardEventTap() {
+        stopKeyboardEventTap()
+        let mask = CGEventMask(1 << CGEventType.keyDown.rawValue)
+        let callback: CGEventTapCallBack = { _, type, event, refcon in
+            guard let refcon else { return Unmanaged.passUnretained(event) }
+            let overlay = Unmanaged<TranslateOverlay>.fromOpaque(refcon).takeUnretainedValue()
+            return overlay.handleKeyEventTap(type: type, event: event)
+        }
+        guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap,
+                                          place: .headInsertEventTap,
+                                          options: .defaultTap,
+                                          eventsOfInterest: mask,
+                                          callback: callback,
+                                          userInfo: Unmanaged.passUnretained(self).toOpaque()) else {
+            logWarn("TranslateOverlay", "Failed to create keyboard event tap")
+            return
+        }
+        keyEventTap = tap
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0)
+        keyEventRunLoopSource = source
+        if let source {
+            CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func stopKeyboardEventTap() {
+        if let tap = keyEventTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+            keyEventTap = nil
+        }
+        if let source = keyEventRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+            keyEventRunLoopSource = nil
+        }
+    }
+
+    private func handleKeyEventTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        switch type {
+        case .tapDisabledByTimeout, .tapDisabledByUserInput:
+            if let tap = keyEventTap {
+                CGEvent.tapEnable(tap: tap, enable: true)
+            }
+            return Unmanaged.passUnretained(event)
+        case .keyDown:
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            switch keyCode {
+            case 53: // Esc
+                DispatchQueue.main.async { [weak self] in self?.dismiss() }
+                return nil
+            case 36, 76: // Return, Keypad Enter
+                DispatchQueue.main.async { [weak self] in
+                    self?.copyTapped()
+                    self?.dismiss()
+                }
+                return nil
+            default:
+                return Unmanaged.passUnretained(event)
+            }
+        default:
+            return Unmanaged.passUnretained(event)
         }
     }
 
