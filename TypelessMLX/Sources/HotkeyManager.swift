@@ -1,6 +1,7 @@
 import Cocoa
 import Carbon
 import AVFoundation
+@preconcurrency import SpeechVAD
 
 final class HotkeyManager {
     static let shared = HotkeyManager()
@@ -34,9 +35,22 @@ final class HotkeyManager {
     private var liveDraftGeneration: UInt64 = 0
     private var liveDraftLastSampleCount: Int = 0
     private var liveDraftInFlight = false
-    private static let liveDraftMaxWindowSeconds: Double = 8
-    private static let liveDraftMinIntervalSeconds: Double = 0.8
-    private static let liveDraftMinDeltaSeconds: Double = 0.35
+    private var liveDraftModelType = ""
+    private var liveDraftLanguage: String?
+    private var liveDraftUsingVAD = false
+    private var liveDraftProcessor: StreamingVADProcessor?
+    private var liveDraftSpeechActive = false
+    private var liveDraftSpeechBuffer: [Float] = []
+    private var liveDraftRollingBuffer: [Float] = []
+    private var liveDraftLastPartialSampleCount: Int = 0
+    private static let liveDraftFallbackMaxWindowSeconds: Double = 8
+    private static let liveDraftFallbackMinIntervalSeconds: Double = 0.8
+    private static let liveDraftFallbackMinDeltaSeconds: Double = 0.35
+    private static let liveDraftVADSampleRate = 16000
+    private static let liveDraftPartialIntervalSeconds: Double = 0.5
+    private static let liveDraftPartialMinDeltaSeconds: Double = 0.25
+    private static let liveDraftPreSpeechSeconds: Double = 0.6
+    private static let liveDraftMaxSegmentSeconds: Double = 6.0
     private static let maxConsecutiveFailures = 3
 
     private init() {}
@@ -437,7 +451,6 @@ final class HotkeyManager {
             }
         }
     }
-
     private func startModelLiveDraft(modelType: String, language: String?) {
         stopModelLiveDraft()
         liveDraftQueue.sync {
@@ -445,15 +458,84 @@ final class HotkeyManager {
             liveDraftSampleRate = 16000
             liveDraftLastSampleCount = 0
             liveDraftInFlight = false
+            liveDraftModelType = modelType
+            liveDraftLanguage = language
+            liveDraftUsingVAD = modelType == "qwen3"
+            liveDraftProcessor = nil
+            liveDraftSpeechActive = false
+            liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
+            liveDraftRollingBuffer.removeAll(keepingCapacity: true)
+            liveDraftLastPartialSampleCount = 0
             liveDraftGeneration &+= 1
         }
 
         let generation = liveDraftQueue.sync { liveDraftGeneration }
+        if modelType == "qwen3" {
+            startQwen3VADLiveDraft(language: language, generation: generation)
+        } else {
+            startFixedWindowLiveDraft(modelType: modelType, language: language, generation: generation)
+        }
+    }
+
+    private func startQwen3VADLiveDraft(language: String?, generation: UInt64) {
+        guard let sileroCacheDir = bundledSileroVADDirectory() else {
+            logError("HotkeyManager", "Bundled Silero VAD not found; falling back to fixed-window live draft")
+            AppState.shared.showModelCacheAlert(feature: "实时字幕", modelId: SileroVADModel.defaultModelId)
+            liveDraftQueue.async { [weak self] in
+                guard let self, self.liveDraftGeneration == generation else { return }
+                self.liveDraftUsingVAD = false
+            }
+            startFixedWindowLiveDraft(modelType: "qwen3", language: language, generation: generation)
+            return
+        }
+
+        liveDraftTask = Task { [weak self] in
+            do {
+                let vad = try await SileroVADModel.fromPretrained(
+                    modelId: SileroVADModel.defaultModelId,
+                    cacheDir: sileroCacheDir,
+                    offlineMode: true
+                )
+                let config = VADConfig(
+                    onset: 0.5,
+                    offset: 0.35,
+                    minSpeechDuration: 0.18,
+                    minSilenceDuration: 0.16,
+                    windowDuration: 0.032,
+                    stepRatio: 1.0
+                )
+                let processor = StreamingVADProcessor(model: vad, config: config)
+                guard let self else { return }
+                nonisolated(unsafe) let manager = self
+                nonisolated(unsafe) let vadProcessor = processor
+                manager.liveDraftQueue.async {
+                    guard manager.liveDraftGeneration == generation else { return }
+                    manager.liveDraftProcessor = vadProcessor
+                    logInfo("HotkeyManager", "Qwen3 VAD live draft ready")
+                }
+            } catch {
+                logError("HotkeyManager", "Failed to load Silero VAD for live draft: \(error)")
+                await MainActor.run {
+                    AppState.shared.showModelCacheAlert(feature: "实时字幕", modelId: SileroVADModel.defaultModelId)
+                }
+                guard let self else { return }
+                nonisolated(unsafe) let manager = self
+                manager.liveDraftQueue.async {
+                    guard manager.liveDraftGeneration == generation else { return }
+                    manager.liveDraftUsingVAD = false
+                    manager.liveDraftProcessor = nil
+                }
+                manager.startFixedWindowLiveDraft(modelType: "qwen3", language: language, generation: generation)
+            }
+        }
+    }
+
+    private func startFixedWindowLiveDraft(modelType: String, language: String?, generation: UInt64) {
         liveDraftTask = Task { [weak self] in
             while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(Self.liveDraftMinIntervalSeconds * 1_000_000_000))
+                try? await Task.sleep(nanoseconds: UInt64(Self.liveDraftFallbackMinIntervalSeconds * 1_000_000_000))
                 guard !Task.isCancelled else { break }
-                self?.requestModelLiveDraft(
+                self?.requestFixedWindowLiveDraft(
                     modelType: modelType,
                     language: language,
                     generation: generation
@@ -468,8 +550,17 @@ final class HotkeyManager {
         liveDraftQueue.sync {
             liveDraftGeneration &+= 1
             liveDraftBuffer.removeAll(keepingCapacity: true)
+            liveDraftSampleRate = 16000
             liveDraftLastSampleCount = 0
             liveDraftInFlight = false
+            liveDraftModelType = ""
+            liveDraftLanguage = nil
+            liveDraftUsingVAD = false
+            liveDraftProcessor = nil
+            liveDraftSpeechActive = false
+            liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
+            liveDraftRollingBuffer.removeAll(keepingCapacity: true)
+            liveDraftLastPartialSampleCount = 0
         }
         DispatchQueue.main.async { [weak self] in
             self?.overlay?.updateLiveText("")
@@ -502,22 +593,122 @@ final class HotkeyManager {
 
         liveDraftQueue.async { [weak self] in
             guard let self else { return }
-            if self.liveDraftSampleRate != sampleRate {
-                self.liveDraftBuffer.removeAll(keepingCapacity: true)
-                self.liveDraftLastSampleCount = 0
-                self.liveDraftSampleRate = sampleRate
-            }
-
-            self.liveDraftBuffer.append(contentsOf: samples)
-            let maxSamples = max(1, Int(Self.liveDraftMaxWindowSeconds * Double(sampleRate)))
-            if self.liveDraftBuffer.count > maxSamples {
-                self.liveDraftBuffer.removeFirst(self.liveDraftBuffer.count - maxSamples)
-                self.liveDraftLastSampleCount = min(self.liveDraftLastSampleCount, self.liveDraftBuffer.count)
+            if self.liveDraftUsingVAD {
+                let resampled = Self.resampleLinear(
+                    samples,
+                    from: sampleRate,
+                    to: Self.liveDraftVADSampleRate
+                )
+                self.appendQwen3VADLiveDraftSamples(resampled)
+            } else {
+                self.appendFixedWindowLiveDraftSamples(samples, sampleRate: sampleRate)
             }
         }
     }
 
-    private func requestModelLiveDraft(
+    private func appendQwen3VADLiveDraftSamples(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+
+        liveDraftRollingBuffer.append(contentsOf: samples)
+        let preSpeechSamples = max(1, Int(Self.liveDraftPreSpeechSeconds * Double(Self.liveDraftVADSampleRate)))
+        if liveDraftRollingBuffer.count > preSpeechSamples {
+            liveDraftRollingBuffer.removeFirst(liveDraftRollingBuffer.count - preSpeechSamples)
+        }
+
+        guard let processor = liveDraftProcessor else { return }
+        let events = processor.process(samples: samples)
+        var startedInThisChunk = false
+
+        for event in events {
+            switch event {
+            case .speechStarted:
+                liveDraftSpeechActive = true
+                liveDraftSpeechBuffer = liveDraftRollingBuffer
+                liveDraftLastPartialSampleCount = 0
+                startedInThisChunk = true
+
+            case .speechEnded:
+                if liveDraftSpeechActive {
+                    requestQwen3VADLiveDraft(force: true)
+                }
+                liveDraftSpeechActive = false
+                liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
+                liveDraftLastPartialSampleCount = 0
+            }
+        }
+
+        if liveDraftSpeechActive && !startedInThisChunk {
+            liveDraftSpeechBuffer.append(contentsOf: samples)
+        }
+
+        let maxSegmentSamples = max(1, Int(Self.liveDraftMaxSegmentSeconds * Double(Self.liveDraftVADSampleRate)))
+        if liveDraftSpeechBuffer.count > maxSegmentSamples {
+            liveDraftSpeechBuffer.removeFirst(liveDraftSpeechBuffer.count - maxSegmentSamples)
+            liveDraftLastPartialSampleCount = min(liveDraftLastPartialSampleCount, liveDraftSpeechBuffer.count)
+        }
+
+        if liveDraftSpeechActive {
+            requestQwen3VADLiveDraft(force: false)
+        }
+    }
+
+    private func requestQwen3VADLiveDraft(force: Bool) {
+        guard !liveDraftInFlight else { return }
+        let minSamples = Int(Self.liveDraftPartialIntervalSeconds * Double(Self.liveDraftVADSampleRate))
+        let minDelta = Int(Self.liveDraftPartialMinDeltaSeconds * Double(Self.liveDraftVADSampleRate))
+        guard liveDraftSpeechBuffer.count >= minSamples else { return }
+        guard force || liveDraftSpeechBuffer.count - liveDraftLastPartialSampleCount >= minDelta else { return }
+
+        let audio = liveDraftSpeechBuffer
+        let language = liveDraftLanguage
+        let generation = liveDraftGeneration
+        liveDraftLastPartialSampleCount = liveDraftSpeechBuffer.count
+        liveDraftInFlight = true
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            do {
+                let text = try await ASRService.shared.transcribe(
+                    audio: audio,
+                    sampleRate: Self.liveDraftVADSampleRate,
+                    language: language
+                )
+                guard let self else { return }
+                let isCurrent = self.liveDraftQueue.sync { self.liveDraftGeneration == generation }
+                guard isCurrent else { return }
+                await MainActor.run {
+                    self.overlay?.updateLiveText(text)
+                }
+            } catch is CancellationError {
+                // Recording stopped; final transcription path handles the result.
+            } catch {
+                logDebug("HotkeyManager", "Qwen3 VAD live draft failed: \(error.localizedDescription)")
+            }
+
+            guard let self else { return }
+            nonisolated(unsafe) let manager = self
+            manager.liveDraftQueue.async {
+                guard manager.liveDraftGeneration == generation else { return }
+                manager.liveDraftInFlight = false
+            }
+        }
+    }
+
+    private func appendFixedWindowLiveDraftSamples(_ samples: [Float], sampleRate: Int) {
+        if liveDraftSampleRate != sampleRate {
+            liveDraftBuffer.removeAll(keepingCapacity: true)
+            liveDraftLastSampleCount = 0
+            liveDraftSampleRate = sampleRate
+        }
+
+        liveDraftBuffer.append(contentsOf: samples)
+        let maxSamples = max(1, Int(Self.liveDraftFallbackMaxWindowSeconds * Double(sampleRate)))
+        if liveDraftBuffer.count > maxSamples {
+            liveDraftBuffer.removeFirst(liveDraftBuffer.count - maxSamples)
+            liveDraftLastSampleCount = min(liveDraftLastSampleCount, liveDraftBuffer.count)
+        }
+    }
+
+    private func requestFixedWindowLiveDraft(
         modelType: String,
         language: String?,
         generation: UInt64
@@ -527,8 +718,8 @@ final class HotkeyManager {
                   self.liveDraftGeneration == generation,
                   !self.liveDraftInFlight else { return }
 
-            let minSamples = Int(Self.liveDraftMinIntervalSeconds * Double(self.liveDraftSampleRate))
-            let minDelta = Int(Self.liveDraftMinDeltaSeconds * Double(self.liveDraftSampleRate))
+            let minSamples = Int(Self.liveDraftFallbackMinIntervalSeconds * Double(self.liveDraftSampleRate))
+            let minDelta = Int(Self.liveDraftFallbackMinDeltaSeconds * Double(self.liveDraftSampleRate))
             guard self.liveDraftBuffer.count >= minSamples,
                   self.liveDraftBuffer.count - self.liveDraftLastSampleCount >= minDelta else { return }
 
@@ -569,6 +760,30 @@ final class HotkeyManager {
                 }
             }
         }
+    }
+
+    private func bundledSileroVADDirectory() -> URL? {
+        guard let resourceURL = Bundle.main.resourceURL else { return nil }
+        let dir = resourceURL
+            .appendingPathComponent("silero-vad", isDirectory: true)
+            .appendingPathComponent("Silero-VAD-v5-MLX", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
+        return dir
+    }
+
+    private static func resampleLinear(_ samples: [Float], from sourceRate: Int, to targetRate: Int) -> [Float] {
+        guard !samples.isEmpty, sourceRate > 0, targetRate > 0, sourceRate != targetRate else { return samples }
+        let ratio = Double(targetRate) / Double(sourceRate)
+        let outputCount = max(1, Int(Double(samples.count) * ratio))
+        var output = [Float](repeating: 0, count: outputCount)
+        for i in 0..<outputCount {
+            let sourcePosition = Double(i) / ratio
+            let lower = Int(sourcePosition)
+            let upper = min(lower + 1, samples.count - 1)
+            let fraction = Float(sourcePosition - Double(lower))
+            output[i] = samples[lower] * (1 - fraction) + samples[upper] * fraction
+        }
+        return output
     }
 
     private func handleFailure(appState: AppState, message: String) {
