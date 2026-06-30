@@ -12,7 +12,7 @@ class SelectionManager: NSObject {
 
         for screen in NSScreen.screens {
             let win = NSWindow(
-                contentRect: screen.frame,
+                contentRect: NSRect(origin: .zero, size: screen.frame.size),
                 styleMask: .borderless,
                 backing: .buffered,
                 defer: false,
@@ -24,8 +24,12 @@ class SelectionManager: NSObject {
             win.collectionBehavior = [.canJoinAllSpaces, .stationary, .fullScreenAuxiliary]
             win.ignoresMouseEvents = false
             win.isMovable = false
+            // Explicitly place each overlay on its target display frame.
+            // This avoids coordinate misplacement on extended multi-monitor layouts.
+            win.setFrame(screen.frame, display: true)
 
-            let view = SelectionView(frame: NSRect(origin: .zero, size: screen.frame.size),
+            let view = SelectionView(frame: win.contentView?.bounds
+                                     ?? NSRect(origin: .zero, size: screen.frame.size),
                                      screen: screen)
             view.onSelect = { [weak self] rect in self?.finish(rect: rect, screen: screen) }
             view.onCancel = { [weak self] in self?.cancel() }

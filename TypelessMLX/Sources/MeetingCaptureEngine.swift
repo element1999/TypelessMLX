@@ -218,6 +218,9 @@ class MeetingCaptureEngine: NSObject {
 
         guard let sileroCacheDir = bundledSileroVADDirectory() else {
             logError("MeetingCaptureEngine", "Bundled Silero VAD not found in app resources")
+            DispatchQueue.main.async {
+                self.appState?.showModelCacheAlert(feature: "会议字幕", modelId: SileroVADModel.defaultModelId)
+            }
             return
         }
 
@@ -239,6 +242,9 @@ class MeetingCaptureEngine: NSObject {
                 }
             } catch {
                 logError("MeetingCaptureEngine", "Failed to load bundled Silero VAD: \(error)")
+                DispatchQueue.main.async {
+                    self.appState?.showModelCacheAlert(feature: "会议字幕", modelId: SileroVADModel.defaultModelId)
+                }
             }
         }
     }

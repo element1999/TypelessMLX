@@ -65,18 +65,36 @@ class RecordingOverlay {
 
     /// Pass an empty string to collapse the text section; non-empty expands the pill.
     func updateLiveText(_ text: String) {
+        if !Thread.isMainThread {
+            DispatchQueue.main.async { [weak self] in
+                self?.updateLiveText(text)
+            }
+            return
+        }
+
         guard let label = textLabel, let win = window, let pill = pillView else { return }
-        if text.isEmpty {
+        let visibleText = visibleLiveText(from: text)
+        if visibleText.isEmpty {
             guard hasText else { return }
             hasText = false
             label.stringValue = ""
             animatePill(expand: false, window: win, pill: pill)
         } else {
-            label.stringValue = text
+            label.stringValue = visibleText
             guard !hasText else { return }
             hasText = true
             animatePill(expand: true, window: win, pill: pill)
         }
+    }
+
+    /// Keep the newest tail of a long partial transcript so the label keeps changing
+    /// during long utterances instead of appearing frozen after width truncation.
+    private func visibleLiveText(from text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        let maxChars = 80
+        if trimmed.count <= maxChars { return trimmed }
+        return "…" + String(trimmed.suffix(maxChars))
     }
 
     func updateAudioLevel(_ level: Float) {
@@ -296,7 +314,7 @@ class RecordingOverlay {
         label.isBezeled       = false
         label.isEditable      = false
         label.alignment       = .center
-        label.lineBreakMode   = .byTruncatingTail
+        label.lineBreakMode   = .byTruncatingHead
         label.frame           = CGRect(x: 16, y: 4, width: overlayWidth - 32, height: textSectionH - 8)
         label.alphaValue      = 0
         pill.addSubview(label)

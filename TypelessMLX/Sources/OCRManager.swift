@@ -194,7 +194,7 @@ class OCRResultOverlay: NSObject {
 
     private var window: NSWindow?
     private var textView: NSTextView?
-    private var escMonitor: Any?
+    private var localKeyMonitor: Any?
     private var clickMonitor: Any?
     private var dismissWork: DispatchWorkItem?
     private var currentContent = ""
@@ -240,7 +240,7 @@ class OCRResultOverlay: NSObject {
     func dismiss() {
         dismissWork?.cancel()
         dismissWork = nil
-        if let m = escMonitor { NSEvent.removeMonitor(m); escMonitor = nil }
+        if let m = localKeyMonitor { NSEvent.removeMonitor(m); localKeyMonitor = nil }
         if let m = clickMonitor { NSEvent.removeMonitor(m); clickMonitor = nil }
         window?.orderOut(nil)
         window = nil
@@ -270,12 +270,12 @@ class OCRResultOverlay: NSObject {
         titleLabel.frame = NSRect(x: 12, y: 8, width: 120, height: 18)
         header.addSubview(titleLabel)
 
-        let pasteBtn = NSButton(title: "粘贴", target: self, action: #selector(pasteTapped))
-        pasteBtn.isBordered = false
-        pasteBtn.font = .systemFont(ofSize: 11, weight: .medium)
-        pasteBtn.contentTintColor = .white
-        pasteBtn.frame = NSRect(x: windowWidth - 68, y: 7, width: 40, height: 18)
-        header.addSubview(pasteBtn)
+        let copyBtn = NSButton(title: "复制", target: self, action: #selector(copyTapped))
+        copyBtn.isBordered = false
+        copyBtn.font = .systemFont(ofSize: 11, weight: .medium)
+        copyBtn.contentTintColor = .white
+        copyBtn.frame = NSRect(x: windowWidth - 68, y: 7, width: 40, height: 18)
+        header.addSubview(copyBtn)
 
         let closeBtn = NSButton(title: "✕", target: self, action: #selector(closeTapped))
         closeBtn.isBordered = false
@@ -337,9 +337,20 @@ class OCRResultOverlay: NSObject {
     // MARK: - Monitors
 
     private func registerMonitors() {
-        escMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53 { self?.dismiss() }
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+            switch event.keyCode {
+            case 53:
+                self.dismiss()
+                return nil
+            case 36, 76: // Return / Keypad Enter
+                self.copyTapped()
+                return nil
+            default:
+                return event
+            }
         }
+
         clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
             guard let self = self, let w = self.window else { return }
             if !w.frame.contains(NSEvent.mouseLocation) { self.dismiss() }
@@ -353,9 +364,11 @@ class OCRResultOverlay: NSObject {
         DispatchQueue.main.asyncAfter(deadline: .now() + seconds, execute: work)
     }
 
-    @objc private func pasteTapped() {
+     @objc private func copyTapped() {
         guard !currentContent.isEmpty else { return }
-        TextPaster.shared.pasteText(currentContent)
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(currentContent, forType: .string)
         dismiss()
     }
 

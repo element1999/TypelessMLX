@@ -1,4 +1,5 @@
 import Foundation
+import AVFoundation
 import CoreML
 import WhisperKit
 
@@ -53,6 +54,51 @@ actor WhisperService {
 
         logInfo("WhisperService", "Transcription (\(text.count) chars): \(text.prefix(80))")
         return text
+    }
+
+    /// Transcribes in-memory PCM for live preview.
+    /// - Parameters:
+    ///   - audio: mono float samples
+    ///   - sampleRate: input sample rate
+    func transcribe(audio: [Float], sampleRate: Int, language: String? = nil) async throws -> String {
+        guard !audio.isEmpty else { return "" }
+
+        let selected = await MainActor.run { AppState.shared.selectedModel }
+        guard let variant = AppState.whisperKitVariant(for: selected.id) else {
+            throw whisperError("不支持的 WhisperKit 模型：\(selected.id)")
+        }
+
+        let modelKey = "\(selected.id):\(variant)"
+        if whisperKit == nil || currentModelKey != modelKey {
+            try await loadModel(modelID: selected.id, variant: variant)
+        }
+
+        guard let wk = whisperKit else {
+            throw whisperError("WhisperKit 未初始化")
+        }
+
+        let input = try resampleTo16kIfNeeded(audio: audio, sampleRate: sampleRate)
+
+        var options = DecodingOptions()
+        options.task = .transcribe
+        options.temperature = 0
+        options.temperatureIncrementOnFallback = 0
+        options.temperatureFallbackCount = 0
+        options.withoutTimestamps = true
+        options.wordTimestamps = false
+        options.skipSpecialTokens = true
+        options.suppressBlank = true
+        options.logProbThreshold = -0.8
+        options.compressionRatioThreshold = 2.0
+        if let lang = language, !lang.isEmpty, lang != "auto" {
+            options.language = lang
+            options.detectLanguage = false
+        }
+
+        let results = try await wk.transcribe(audioArray: input, decodeOptions: options)
+        let rawText = results.map { $0.text }.joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return sanitizeWhisperOutput(rawText)
     }
 
     func unload() {
@@ -311,5 +357,62 @@ actor WhisperService {
 
         let hasWord = cleaned.range(of: #"[\p{L}\p{N}]"#, options: .regularExpression) != nil
         return hasWord ? cleaned : ""
+    }
+
+    private func resampleTo16kIfNeeded(audio: [Float], sampleRate: Int) throws -> [Float] {
+        guard sampleRate > 0 else { return audio }
+        if sampleRate == 16000 { return audio }
+
+        guard let inFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: Double(sampleRate),
+            channels: 1,
+            interleaved: false
+        ), let outFormat = AVAudioFormat(
+            commonFormat: .pcmFormatFloat32,
+            sampleRate: 16000,
+            channels: 1,
+            interleaved: false
+        ) else {
+            return audio
+        }
+
+        let inCount = AVAudioFrameCount(audio.count)
+        guard let inBuffer = AVAudioPCMBuffer(pcmFormat: inFormat, frameCapacity: inCount) else {
+            return audio
+        }
+        inBuffer.frameLength = inCount
+        audio.withUnsafeBufferPointer { src in
+            guard let dst = inBuffer.floatChannelData?[0], let base = src.baseAddress else { return }
+            dst.assign(from: base, count: src.count)
+        }
+
+        let outCapacity = AVAudioFrameCount(Double(audio.count) * 16000.0 / Double(sampleRate)) + 16
+        guard let outBuffer = AVAudioPCMBuffer(pcmFormat: outFormat, frameCapacity: max(1, outCapacity)) else {
+            return audio
+        }
+        guard let converter = AVAudioConverter(from: inFormat, to: outFormat) else {
+            return audio
+        }
+
+        var provided = false
+        var error: NSError?
+        converter.convert(to: outBuffer, error: &error) { _, outStatus in
+            if provided {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            provided = true
+            outStatus.pointee = .haveData
+            return inBuffer
+        }
+
+        if error != nil || outBuffer.frameLength == 0 {
+            return audio
+        }
+
+        let count = Int(outBuffer.frameLength)
+        guard let ptr = outBuffer.floatChannelData?[0], count > 0 else { return audio }
+        return Array(UnsafeBufferPointer(start: ptr, count: count))
     }
 }

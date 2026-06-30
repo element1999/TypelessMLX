@@ -192,6 +192,7 @@ struct ModelRow: View {
     let isDownloading: Bool
     let downloadStatusText: String
     let anyDownloading: Bool
+    let isSelectable: Bool
     let onSelect: () -> Void
     let onDownload: () -> Void
     let onDelete: () -> Void
@@ -245,7 +246,10 @@ struct ModelRow: View {
             }
         }
         .contentShape(Rectangle())
-        .onTapGesture(perform: onSelect)
+        .onTapGesture {
+            guard isSelectable else { return }
+            onSelect()
+        }
     }
 
     @ViewBuilder
@@ -290,6 +294,7 @@ struct ModelSettingsTab: View {
                         isDownloading: modelManager.downloadingModelID == model.id,
                         downloadStatusText: modelManager.downloadStatusText,
                         anyDownloading: modelManager.downloadingModelID != nil,
+                        isSelectable: modelManager.isSelectable(model),
                         onSelect: { appState.selectedModelID = model.id },
                         onDownload: { modelManager.download(model) },
                         onDelete: { deleteConfirmModelID = model.id }

@@ -36,6 +36,10 @@ class ModelManager: ObservableObject {
         return (cachedSizes[model.id] ?? 0) > 0
     }
 
+    func isSelectable(_ model: MLXModel) -> Bool {
+        model.isLocal || isCached(model)
+    }
+
     /// Human-readable size string, e.g. "1.2 GB"
     func sizeString(for model: MLXModel) -> String {
         let bytes = cachedSizes[model.id] ?? 0
@@ -111,10 +115,11 @@ class ModelManager: ObservableObject {
     // MARK: - Delete
 
     func delete(_ model: MLXModel) throws {
-        guard let cacheURL = cacheDirectory(for: model) else { return }
-        if FileManager.default.fileExists(atPath: cacheURL.path) {
-            try FileManager.default.removeItem(at: cacheURL)
-            logInfo("ModelManager", "Deleted cache: \(cacheURL.lastPathComponent)")
+        for cacheURL in cacheDirectories(for: model) {
+            if FileManager.default.fileExists(atPath: cacheURL.path) {
+                try FileManager.default.removeItem(at: cacheURL)
+                logInfo("ModelManager", "Deleted cache: \(cacheURL.lastPathComponent)")
+            }
         }
         DispatchQueue.main.async { self.cachedSizes[model.id] = 0 }
     }
@@ -156,35 +161,48 @@ class ModelManager: ObservableObject {
 
     // MARK: - Paths
 
-    /// Returns the root cache directory for the model (nil if not applicable).
+    /// Returns the primary cache directory for the model (nil if not applicable).
     private func cacheDirectory(for model: MLXModel) -> URL? {
+        cacheDirectories(for: model).first
+    }
+
+    /// Returns all possible cache roots for the model.
+    private func cacheDirectories(for model: MLXModel) -> [URL] {
         if model.isLocal {
             if model.repoOrPath.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                return nil
+                return []
             }
-            return URL(fileURLWithPath: model.repoOrPath)
+            return [URL(fileURLWithPath: model.repoOrPath)]
         }
-        // HuggingFace Hub format: models--org--repo
+
         let sanitized = model.repoOrPath.replacingOccurrences(of: "/", with: "--")
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)")
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        return [
+            home.appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)"),
+            home.appendingPathComponent("Library/Caches/huggingface/hub/models--\(sanitized)")
+        ]
     }
 
     private func cachedWhisperKitModelFolder(for model: MLXModel) -> URL? {
         guard model.modelType == "whisper",
-              let variant = AppState.whisperKitVariant(for: model.id),
-              let dir = cacheDirectory(for: model) else { return nil }
-        let snapshots = dir.appendingPathComponent("snapshots")
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { return nil }
+              let variant = AppState.whisperKitVariant(for: model.id) else { return nil }
 
-        return names
-            .map { snapshots.appendingPathComponent($0).appendingPathComponent(variant) }
-            .filter { WhisperService.hasWhisperKitCoreMLFiles(in: $0) }
-            .max { lhs, rhs in
-                let lDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let rDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return lDate < rDate
-            }
+        var candidates: [URL] = []
+        for dir in cacheDirectories(for: model) {
+            let snapshots = dir.appendingPathComponent("snapshots")
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { continue }
+
+            let found = names
+                .map { snapshots.appendingPathComponent($0).appendingPathComponent(variant) }
+                .filter { WhisperService.hasWhisperKitCoreMLFiles(in: $0) }
+            candidates.append(contentsOf: found)
+        }
+
+        return candidates.max { lhs, rhs in
+            let lDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            let rDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            return lDate < rDate
+        }
     }
 
     private func hasCachedWhisperKitCoreMLModel(_ model: MLXModel) -> Bool {
@@ -192,26 +210,51 @@ class ModelManager: ObservableObject {
     }
 
     private func diskSize(for model: MLXModel) -> Int64 {
-        guard let dir = cacheDirectory(for: model) else { return 0 }
         if model.isLocal {
+            guard let dir = cacheDirectory(for: model) else { return 0 }
             guard FileManager.default.fileExists(atPath: dir.path) else { return 0 }
             return directorySize(dir)
         }
+
+        let dirs = cacheDirectories(for: model)
+        guard !dirs.isEmpty else { return 0 }
+
         if model.modelType == "whisper", let variant = AppState.whisperKitVariant(for: model.id) {
-            let snapshots = dir.appendingPathComponent("snapshots")
-            guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { return 0 }
-            let size = names.reduce(Int64(0)) { total, name in
-                let variantDir = snapshots.appendingPathComponent(name).appendingPathComponent(variant)
-                guard FileManager.default.fileExists(atPath: variantDir.path) else { return total }
-                return max(total, directorySize(variantDir))
+            var best: Int64 = 0
+            for dir in dirs {
+                let snapshots = dir.appendingPathComponent("snapshots")
+                guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { continue }
+                let size = names.reduce(Int64(0)) { total, name in
+                    let variantDir = snapshots.appendingPathComponent(name).appendingPathComponent(variant)
+                    guard FileManager.default.fileExists(atPath: variantDir.path) else { return total }
+                    return max(total, directorySize(variantDir))
+                }
+                best = max(best, size)
             }
-            return size > 1024 ? size : 0
+            return best > 1024 ? best : 0
         }
-        // HF Hub stores actual files in blobs/ (snapshots/ only has symlinks)
-        let blobs = dir.appendingPathComponent("blobs")
-        guard FileManager.default.fileExists(atPath: blobs.path) else { return 0 }
-        let size = directorySize(blobs)
-        return size > 1024 ? size : 0
+
+        // Prefer Hub blobs/ when present.
+        var bestBlobSize: Int64 = 0
+        for dir in dirs {
+            let blobs = dir.appendingPathComponent("blobs")
+            guard FileManager.default.fileExists(atPath: blobs.path) else { continue }
+            bestBlobSize = max(bestBlobSize, directorySize(blobs))
+        }
+        if bestBlobSize > 1024 { return bestBlobSize }
+
+        // Offline model zips install real files directly under snapshots/ (not symlinks to blobs).
+        var bestSnapshotSize: Int64 = 0
+        for dir in dirs {
+            let snapshots = dir.appendingPathComponent("snapshots")
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: snapshots.path) else { continue }
+            for name in names {
+                let snapshotDir = snapshots.appendingPathComponent(name)
+                guard FileManager.default.fileExists(atPath: snapshotDir.path) else { continue }
+                bestSnapshotSize = max(bestSnapshotSize, directorySize(snapshotDir))
+            }
+        }
+        return bestSnapshotSize > 1024 ? bestSnapshotSize : 0
     }
 
     private func directorySize(_ url: URL) -> Int64 {

@@ -1,6 +1,7 @@
 import SwiftUI
 import Combine
 import AVFoundation
+import AppKit
 
 enum AppStatus: String {
     case idle = "待机中"
@@ -54,7 +55,7 @@ class AppState: ObservableObject {
     @Published var isTeamsMeetingActive: Bool = false
 
     // Settings (persisted via AppStorage)
-    @AppStorage("selectedModelID") var selectedModelID: String = "macos-speech"
+    @AppStorage("selectedModelID") var selectedModelID: String = "qwen3-asr-1.7b"
     @AppStorage("showFloatingOverlay") var showFloatingOverlay: Bool = true
     @AppStorage("playSounds") var playSounds: Bool = false
     @AppStorage("launchAtLogin") var launchAtLogin: Bool = false
@@ -80,6 +81,8 @@ class AppState: ObservableObject {
     // Live transcription text (set by ASR progress callbacks)
     @Published var liveTranscriptionConfirmedText: String = ""
     @Published var liveTranscriptionUnconfirmedText: String = ""
+    private var lastModelCacheAlertAt: Date = .distantPast
+    private let modelCacheAlertCooldown: TimeInterval = 8
 
     // Available MLX models
     static let availableModels: [MLXModel] = [
@@ -179,7 +182,7 @@ class AppState: ObservableObject {
         default: break
         }
         if !Self.availableModels.contains(where: { $0.id == selectedModelID }) {
-            selectedModelID = "macos-speech"
+            selectedModelID = "qwen3-asr-1.7b"
         }
 
         let defaultModifiers = 6144  // controlKey | optionKey
@@ -229,6 +232,39 @@ class AppState: ObservableObject {
             self.errorMessage = message
         } else {
             DispatchQueue.main.async { self.errorMessage = message }
+        }
+    }
+
+    func showModelCacheAlert(feature: String, modelId: String) {
+        let message = "\(feature)所需模型本地缓存不可用：\(modelId)。请在“偏好设置 → 模型”手动下载；若已下载，请删除后重新下载。"
+        logError("AppState", "Model cache issue: \(message)")
+
+        let present = {
+            let now = Date()
+            if now.timeIntervalSince(self.lastModelCacheAlertAt) < self.modelCacheAlertCooldown {
+                self.errorMessage = message
+                return
+            }
+            self.lastModelCacheAlertAt = now
+            self.errorMessage = message
+
+            let alert = NSAlert()
+            alert.messageText = "模型缓存异常"
+            alert.informativeText = message
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "打开偏好设置")
+            alert.addButton(withTitle: "知道了")
+            NSApp.activate(ignoringOtherApps: true)
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                NSApp.sendAction(Selector(("showPreferencesWindow:")), to: nil, from: nil)
+            }
+        }
+
+        if Thread.isMainThread {
+            present()
+        } else {
+            DispatchQueue.main.async { present() }
         }
     }
 

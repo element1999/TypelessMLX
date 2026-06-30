@@ -108,7 +108,7 @@ class SnipManager: NSObject {
 
                     let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: config)
 
-                    self.pinImage(image, pointSize: pointSize)
+                    self.pinImage(image, pointSize: pointSize, on: screen)
                 } catch {
                     logError("SnipManager", "Screen capture failed: \(error)")
                 }
@@ -116,8 +116,8 @@ class SnipManager: NSObject {
         }
     }
 
-    private func pinImage(_ image: CGImage, pointSize: NSSize) {
-        let pinned = SnipPinnedWindow(image: image, pointSize: pointSize) { [weak self] win in
+    private func pinImage(_ image: CGImage, pointSize: NSSize, on screen: NSScreen) {
+        let pinned = SnipPinnedWindow(image: image, pointSize: pointSize, screen: screen) { [weak self] win in
             self?.pinnedWindows.removeAll(where: { $0 === win })
         }
         pinnedWindows.append(pinned)
@@ -134,11 +134,12 @@ private final class SnipPinnedWindow {
     private let window: NSWindow
     private let closeCallback: (SnipPinnedWindow) -> Void
 
-    init(image: CGImage, pointSize: NSSize, onClose: @escaping (SnipPinnedWindow) -> Void) {
+    init(image: CGImage, pointSize: NSSize, screen: NSScreen, onClose: @escaping (SnipPinnedWindow) -> Void) {
         self.closeCallback = onClose
         let imageSize = pointSize
-        let maxWidth: CGFloat = 720
-        let maxHeight: CGFloat = 520
+        let visible = screen.visibleFrame
+        let maxWidth = max(180, visible.width - 24)
+        let maxHeight = max(80, visible.height - 24)
         let scale = min(1, min(maxWidth / imageSize.width, maxHeight / imageSize.height))
         let displaySize = NSSize(width: max(180, imageSize.width * scale),
                                  height: max(80, imageSize.height * scale))
@@ -159,14 +160,11 @@ private final class SnipPinnedWindow {
         }
         window.contentView = content
 
-        if let screen = NSScreen.main {
-            let sf = screen.visibleFrame
-            let x = sf.midX - displaySize.width / 2
-            let y = sf.midY - displaySize.height / 2
-            window.setFrameOrigin(NSPoint(x: x, y: y))
-        } else {
-            window.center()
-        }
+        // Center on the captured screen (works with extended multi-monitor layouts).
+        let sf = screen.visibleFrame
+        let x = sf.midX - displaySize.width / 2
+        let y = sf.midY - displaySize.height / 2
+        window.setFrameOrigin(NSPoint(x: x, y: y))
     }
 
     func show() {
@@ -184,7 +182,7 @@ private final class SnipPinnedContentView: NSView {
     private let baseImage: NSImage
     private let annotationOverlay = SnipAnnotationOverlayView(frame: .zero)
     private let closeBtn = NSButton(title: "X", target: nil, action: nil)
-    private let boxBtn = NSButton(title: "Box", target: nil, action: nil)
+    private let boxBtn = NSButton(title: "标记", target: nil, action: nil)
     private let clearBtn = NSButton(title: "Clear", target: nil, action: nil)
     private let copyBtn = NSButton(title: "Copy", target: nil, action: nil)
     private var isBoxMode = false {

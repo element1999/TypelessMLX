@@ -1,7 +1,8 @@
 import Cocoa
 import Carbon
+import AVFoundation
 
-class HotkeyManager {
+final class HotkeyManager {
     static let shared = HotkeyManager()
 
     private var appState: AppState?
@@ -26,6 +27,16 @@ class HotkeyManager {
     private let lock = NSLock()
     private var isProcessing = false
     private var consecutiveFailures = 0
+    private let liveDraftQueue = DispatchQueue(label: "com.typelessmlx.live-draft", qos: .userInitiated)
+    private var liveDraftBuffer: [Float] = []
+    private var liveDraftSampleRate: Int = 16000
+    private var liveDraftTask: Task<Void, Never>?
+    private var liveDraftGeneration: UInt64 = 0
+    private var liveDraftLastSampleCount: Int = 0
+    private var liveDraftInFlight = false
+    private static let liveDraftMaxWindowSeconds: Double = 8
+    private static let liveDraftMinIntervalSeconds: Double = 0.8
+    private static let liveDraftMinDeltaSeconds: Double = 0.35
     private static let maxConsecutiveFailures = 3
 
     private init() {}
@@ -249,15 +260,25 @@ class HotkeyManager {
             }
         }
 
-        // Start live preview (SFSpeechRecognizer partial results → text pill)
+        // Start live draft preview using the selected ASR model.
         let liveLanguage = appState.language == "auto" ? nil : appState.language
-        SpeechStreamer.shared.startStreaming(language: liveLanguage)
         let ov = overlay
-        SpeechStreamer.shared.liveTextHandler = { text in
-            ov?.updateLiveText(text)
-        }
-        AudioRecorder.shared.audioBufferHandler = { buffer in
-            SpeechStreamer.shared.appendBuffer(buffer)
+        if appState.selectedModel.modelType == "macos" {
+            SpeechStreamer.shared.startStreaming(language: liveLanguage)
+            SpeechStreamer.shared.liveTextHandler = { text in
+                ov?.updateLiveText(text)
+            }
+            AudioRecorder.shared.audioBufferHandler = { buffer in
+                SpeechStreamer.shared.appendBuffer(buffer)
+            }
+            stopModelLiveDraft()
+        } else {
+            SpeechStreamer.shared.cancelStreaming()
+            SpeechStreamer.shared.liveTextHandler = nil
+            AudioRecorder.shared.audioBufferHandler = { [weak self] buffer in
+                self?.appendLiveDraftBuffer(buffer)
+            }
+            startModelLiveDraft(modelType: appState.selectedModel.modelType, language: liveLanguage)
         }
 
         guard AudioRecorder.shared.startRecording() else {
@@ -292,7 +313,11 @@ class HotkeyManager {
 
         AudioRecorder.shared.audioLevelHandler = nil
         AudioRecorder.shared.audioBufferHandler = nil
-        SpeechStreamer.shared.stopStreaming()
+        if appState.selectedModel.modelType == "macos" {
+            SpeechStreamer.shared.stopStreaming()
+        } else {
+            stopModelLiveDraft()
+        }
 
         AudioRecorder.shared.stopRecording { [weak self] audioURL in
             guard let self = self else { return }
@@ -408,6 +433,139 @@ class HotkeyManager {
                     } catch {
                         await MainActor.run { handleResult(.failure(error)) }
                     }
+                }
+            }
+        }
+    }
+
+    private func startModelLiveDraft(modelType: String, language: String?) {
+        stopModelLiveDraft()
+        liveDraftQueue.sync {
+            liveDraftBuffer.removeAll(keepingCapacity: true)
+            liveDraftSampleRate = 16000
+            liveDraftLastSampleCount = 0
+            liveDraftInFlight = false
+            liveDraftGeneration &+= 1
+        }
+
+        let generation = liveDraftQueue.sync { liveDraftGeneration }
+        liveDraftTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: UInt64(Self.liveDraftMinIntervalSeconds * 1_000_000_000))
+                guard !Task.isCancelled else { break }
+                self?.requestModelLiveDraft(
+                    modelType: modelType,
+                    language: language,
+                    generation: generation
+                )
+            }
+        }
+    }
+
+    private func stopModelLiveDraft() {
+        liveDraftTask?.cancel()
+        liveDraftTask = nil
+        liveDraftQueue.sync {
+            liveDraftGeneration &+= 1
+            liveDraftBuffer.removeAll(keepingCapacity: true)
+            liveDraftLastSampleCount = 0
+            liveDraftInFlight = false
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.overlay?.updateLiveText("")
+        }
+    }
+
+    private func appendLiveDraftBuffer(_ buffer: AVAudioPCMBuffer) {
+        let sampleRate = Int(buffer.format.sampleRate.rounded())
+        let frameCount = Int(buffer.frameLength)
+        let channelCount = Int(buffer.format.channelCount)
+        guard sampleRate > 0, frameCount > 0, channelCount > 0,
+              let channelData = buffer.floatChannelData else { return }
+
+        var samples = [Float](repeating: 0, count: frameCount)
+        if channelCount == 1 {
+            samples.withUnsafeMutableBufferPointer { dst in
+                guard let base = dst.baseAddress else { return }
+                base.update(from: channelData[0], count: frameCount)
+            }
+        } else {
+            let divisor = Float(channelCount)
+            for frame in 0..<frameCount {
+                var sum: Float = 0
+                for channel in 0..<channelCount {
+                    sum += channelData[channel][frame]
+                }
+                samples[frame] = sum / divisor
+            }
+        }
+
+        liveDraftQueue.async { [weak self] in
+            guard let self else { return }
+            if self.liveDraftSampleRate != sampleRate {
+                self.liveDraftBuffer.removeAll(keepingCapacity: true)
+                self.liveDraftLastSampleCount = 0
+                self.liveDraftSampleRate = sampleRate
+            }
+
+            self.liveDraftBuffer.append(contentsOf: samples)
+            let maxSamples = max(1, Int(Self.liveDraftMaxWindowSeconds * Double(sampleRate)))
+            if self.liveDraftBuffer.count > maxSamples {
+                self.liveDraftBuffer.removeFirst(self.liveDraftBuffer.count - maxSamples)
+                self.liveDraftLastSampleCount = min(self.liveDraftLastSampleCount, self.liveDraftBuffer.count)
+            }
+        }
+    }
+
+    private func requestModelLiveDraft(
+        modelType: String,
+        language: String?,
+        generation: UInt64
+    ) {
+        liveDraftQueue.async { [weak self] in
+            guard let self,
+                  self.liveDraftGeneration == generation,
+                  !self.liveDraftInFlight else { return }
+
+            let minSamples = Int(Self.liveDraftMinIntervalSeconds * Double(self.liveDraftSampleRate))
+            let minDelta = Int(Self.liveDraftMinDeltaSeconds * Double(self.liveDraftSampleRate))
+            guard self.liveDraftBuffer.count >= minSamples,
+                  self.liveDraftBuffer.count - self.liveDraftLastSampleCount >= minDelta else { return }
+
+            let audio = self.liveDraftBuffer
+            let sampleRate = self.liveDraftSampleRate
+            self.liveDraftLastSampleCount = self.liveDraftBuffer.count
+            self.liveDraftInFlight = true
+
+            Task.detached(priority: .userInitiated) { [weak self] in
+                do {
+                    let text: String
+                    switch modelType {
+                    case "qwen3":
+                        text = try await ASRService.shared.transcribe(audio: audio, sampleRate: sampleRate, language: language)
+                    case "whisper":
+                        text = try await WhisperService.shared.transcribe(audio: audio, sampleRate: sampleRate, language: language)
+                    default:
+                        text = ""
+                    }
+
+                    guard let self else { return }
+                    let isCurrent = self.liveDraftQueue.sync { self.liveDraftGeneration == generation }
+                    guard isCurrent else { return }
+                    await MainActor.run {
+                        self.overlay?.updateLiveText(text)
+                    }
+                } catch is CancellationError {
+                    // Recording stopped; final transcription path handles the result.
+                } catch {
+                    logDebug("HotkeyManager", "Live draft failed: \(error.localizedDescription)")
+                }
+
+                guard let self else { return }
+                nonisolated(unsafe) let manager = self
+                manager.liveDraftQueue.async {
+                    guard manager.liveDraftGeneration == generation else { return }
+                    manager.liveDraftInFlight = false
                 }
             }
         }

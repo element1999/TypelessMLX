@@ -1,5 +1,4 @@
 import Foundation
-import Hub
 import MLXLLM
 import MLXLMCommon
 
@@ -86,17 +85,20 @@ class LLMService {
     private func loadModel() async throws -> ModelContainer {
         let repoID = AppState.shared.resolvedTextModelPath
         logInfo("LLMService", "Loading text model: \(repoID)")
-        // Check standard HuggingFace cache paths first.
-        if let localURL = resolveLocalURL(repoID) {
-            logInfo("LLMService", "Found cached model at: \(localURL.path)")
-            return try await loadModelContainer(directory: localURL)
-        }
-        // Download via HuggingFace, storing in ~/.cache/huggingface.
-        logInfo("LLMService", "Model not cached, downloading: \(repoID)")
-        let hub = makeHubApi()
-        return try await loadModelContainer(hub: hub, id: repoID)
-    }
 
+        guard let localURL = resolveLocalURL(repoID) else {
+            AppState.shared.showModelCacheAlert(feature: "翻译/查词", modelId: repoID)
+            throw LLMError.localCacheUnavailable(modelId: repoID)
+        }
+
+        logInfo("LLMService", "Found cached model at: \(localURL.path)")
+        do {
+            return try await loadModelContainer(directory: localURL)
+        } catch {
+            AppState.shared.showModelCacheAlert(feature: "翻译/查词", modelId: repoID)
+            throw LLMError.localCacheCorrupted(modelId: repoID, underlying: error)
+        }
+    }
     // Checks ~/.cache/huggingface/hub and ~/Library/Caches/huggingface for existing snapshots
     private func resolveLocalURL(_ repoID: String) -> URL? {
         if repoID.hasPrefix("/") { return URL(fileURLWithPath: repoID) }
@@ -115,15 +117,21 @@ class LLMService {
         return nil
     }
 
-    private func makeHubApi() -> HubApi {
-        // Store in the standard HuggingFace cache layout.
-        let cacheBase = URL(fileURLWithPath: NSHomeDirectory() + "/.cache/huggingface")
-        let endpoint = ProcessInfo.processInfo.environment["HF_ENDPOINT"] ?? "https://hf-mirror.com"
-        return HubApi(downloadBase: cacheBase, endpoint: endpoint)
-    }
 
     enum LLMError: LocalizedError {
         case deallocated
-        var errorDescription: String? { "LLMService deallocated during model load" }
+        case localCacheUnavailable(modelId: String)
+        case localCacheCorrupted(modelId: String, underlying: Error)
+
+        var errorDescription: String? {
+            switch self {
+            case .deallocated:
+                return "LLMService deallocated during model load"
+            case .localCacheUnavailable(let modelId):
+                return "文本模型本地缓存不可用：\(modelId)。请在偏好设置中手动下载模型。"
+            case .localCacheCorrupted(let modelId, let underlying):
+                return "文本模型本地缓存损坏：\(modelId)。请删除后重新下载。原始错误：\(underlying.localizedDescription)"
+            }
+        }
     }
 }

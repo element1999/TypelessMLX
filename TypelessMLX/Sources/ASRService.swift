@@ -3,6 +3,20 @@ import Foundation
 import MLX
 import Qwen3ASR
 
+enum ASRServiceError: LocalizedError {
+    case localCacheUnavailable(modelId: String)
+    case localCacheCorrupted(modelId: String, underlying: Error)
+
+    var errorDescription: String? {
+        switch self {
+        case .localCacheUnavailable(let modelId):
+            return "语音识别模型本地缓存不可用：\(modelId)。请在偏好设置中手动下载模型。"
+        case .localCacheCorrupted(let modelId, let underlying):
+            return "语音识别模型本地缓存损坏：\(modelId)。请删除后重新下载。原始错误：\(underlying.localizedDescription)"
+        }
+    }
+}
+
 /// Manages Qwen3ASR on-device transcription.
 ///
 /// - `transcribe(url:language:)` — for voice dictation (WAV file from AudioTapFileWriter)
@@ -137,27 +151,26 @@ actor ASRService {
         if let localSnapshotPath = localSnapshotPath {
             logInfo("ASRService", "Loading Qwen3ASR model (local): \(localSnapshotPath)")
             let cacheDir = URL(fileURLWithPath: localSnapshotPath)
-            return try await Device.withDefaultDevice(preferredMLXDevice()) {
-                try await Qwen3ASRModel.fromPretrained(
-                    modelId: modelId,
-                    cacheDir: cacheDir,
-                    offlineMode: true
-                ) { progress, status in
-                    let normalized = status.contains("Downloading") ? "Loading local files..." : status
-                    logDebug("ASRService", "Load \(Int(progress * 100))% \(normalized)")
+            do {
+                return try await Device.withDefaultDevice(preferredMLXDevice()) {
+                    try await Qwen3ASRModel.fromPretrained(
+                        modelId: modelId,
+                        cacheDir: cacheDir,
+                        offlineMode: true
+                    ) { progress, status in
+                        let normalized = status.contains("Downloading") ? "Loading local files..." : status
+                        logDebug("ASRService", "Load \(Int(progress * 100))% \(normalized)")
+                    }
                 }
+            } catch {
+                AppState.shared.showModelCacheAlert(feature: "语音识别", modelId: modelId)
+                throw ASRServiceError.localCacheCorrupted(modelId: modelId, underlying: error)
             }
         }
 
-        // HF repo ID — download/cache via speech-swift.
-        logInfo("ASRService", "Loading Qwen3ASR model (remote/cache): \(modelId)")
-        return try await Device.withDefaultDevice(preferredMLXDevice()) {
-            try await Qwen3ASRModel.fromPretrained(modelId: modelId) { progress, status in
-                logDebug("ASRService", "Download \(Int(progress * 100))% \(status)")
-            }
-        }
+        AppState.shared.showModelCacheAlert(feature: "语音识别", modelId: modelId)
+        throw ASRServiceError.localCacheUnavailable(modelId: modelId)
     }
-
     // MARK: - Helpers
 
     /// Loads a WAV file produced by AudioTapFileWriter into Float32 samples.
@@ -231,16 +244,22 @@ actor ASRService {
         }
 
         let sanitized = modelId.replacingOccurrences(of: "/", with: "--")
-        let cacheBase = (NSHomeDirectory() as NSString)
-            .appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)/snapshots")
-        guard let names = try? FileManager.default.contentsOfDirectory(atPath: cacheBase) else {
-            return nil
+        let home = NSHomeDirectory()
+        let cacheBases = [
+            (home as NSString).appendingPathComponent(".cache/huggingface/hub/models--\(sanitized)/snapshots"),
+            (home as NSString).appendingPathComponent("Library/Caches/huggingface/hub/models--\(sanitized)/snapshots")
+        ]
+
+        var snapshots: [URL] = []
+        for cacheBase in cacheBases {
+            guard let names = try? FileManager.default.contentsOfDirectory(atPath: cacheBase) else { continue }
+            let resolved = names.map { name in
+                URL(fileURLWithPath: cacheBase).appendingPathComponent(name, isDirectory: true)
+            }.filter { isUsableSnapshot($0.path) }
+            snapshots.append(contentsOf: resolved)
         }
 
-        let snapshots: [URL] = names.map { name in
-            URL(fileURLWithPath: cacheBase).appendingPathComponent(name, isDirectory: true)
-        }.filter { isUsableSnapshot($0.path) }
-
+        guard !snapshots.isEmpty else { return nil }
         let newest = snapshots.max { lhs, rhs in
             let lDate = (try? lhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
             let rDate = (try? rhs.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
@@ -250,10 +269,15 @@ actor ASRService {
     }
 
     private func isUsableSnapshot(_ path: String) -> Bool {
-        let required = ["config.json", "model.safetensors", "tokenizer.json", "vocab.json"]
-        return required.allSatisfy { file in
-            FileManager.default.fileExists(atPath: (path as NSString).appendingPathComponent(file))
+        let fm = FileManager.default
+        let required = ["config.json", "vocab.json"]
+        let hasRequiredFiles = required.allSatisfy { file in
+            fm.fileExists(atPath: (path as NSString).appendingPathComponent(file))
         }
+        guard hasRequiredFiles else { return false }
+
+        guard let names = try? fm.contentsOfDirectory(atPath: path) else { return false }
+        return names.contains { $0.hasSuffix(".safetensors") }
     }
 
     private func preferredMLXDevice() -> Device {
