@@ -12,7 +12,8 @@ class MeetingCaptureEngine: NSObject {
     private weak var appState: AppState?
     private var transcriptOverlay: TranscriptOverlay?
 
-    // SCStream
+    // SCStream. Holds both started and start-in-flight streams so stop can tear
+    // down capture even if the user disables subtitles during startup.
     private let streamLock = NSLock()
     private var activeStream: SCStream?
 
@@ -68,6 +69,7 @@ class MeetingCaptureEngine: NSObject {
     }
 
     func stop() {
+        disableSubtitleState()
         stopAll()
         transcriptOverlay?.hide()
         SubtitleBar.shared.hide()
@@ -93,6 +95,13 @@ class MeetingCaptureEngine: NSObject {
         let ok = subtitleEnabled && enableToken == token
         enableStateLock.unlock()
         return ok
+    }
+
+    private func disableSubtitleState() {
+        enableStateLock.lock()
+        subtitleEnabled = false
+        enableToken &+= 1
+        enableStateLock.unlock()
     }
 
     // MARK: - Permission
@@ -144,20 +153,29 @@ class MeetingCaptureEngine: NSObject {
             return
         }
 
+        streamLock.lock()
+        if activeStream == nil {
+            activeStream = stream
+        } else {
+            streamLock.unlock()
+            releaseStreamOutput(stream)
+            return
+        }
+        streamLock.unlock()
+
         stream.startCapture { [weak self] error in
             guard let self else { return }
             guard self.canProceed(token: token) else {
-                stream.stopCapture { _ in }
+                self.stopAndRelease(stream, logContext: "cancelled startCapture")
                 return
             }
 
             if let error = error {
                 logError("MeetingCaptureEngine", "startCapture failed: \(error)")
+                self.clearStreamIfCurrent(stream)
+                self.releaseStreamOutput(stream)
                 return
             }
-            self.streamLock.lock()
-            self.activeStream = stream
-            self.streamLock.unlock()
             logInfo("MeetingCaptureEngine", "Capturing all system audio")
             DispatchQueue.main.async {
                 self.appState?.isTeamsMeetingActive = true
@@ -171,10 +189,30 @@ class MeetingCaptureEngine: NSObject {
         let stream = activeStream
         activeStream = nil
         streamLock.unlock()
-        stream?.stopCapture { error in
-            if let error = error { logError("MeetingCaptureEngine", "stopCapture: \(error)") }
-        }
+        if let stream { stopAndRelease(stream, logContext: "stopCapture") }
         DispatchQueue.main.async { self.appState?.isTeamsMeetingActive = false }
+    }
+
+    private func stopAndRelease(_ stream: SCStream, logContext: String) {
+        stream.stopCapture { [weak self] error in
+            if let error = error { logError("MeetingCaptureEngine", "\(logContext): \(error)") }
+            self?.clearStreamIfCurrent(stream)
+            self?.releaseStreamOutput(stream)
+        }
+    }
+
+    private func clearStreamIfCurrent(_ stream: SCStream) {
+        streamLock.lock()
+        if activeStream === stream { activeStream = nil }
+        streamLock.unlock()
+    }
+
+    private func releaseStreamOutput(_ stream: SCStream) {
+        do {
+            try stream.removeStreamOutput(self, type: .audio)
+        } catch {
+            logDebug("MeetingCaptureEngine", "removeStreamOutput ignored: \(error)")
+        }
     }
 
     private func stopAll() {
@@ -563,9 +601,17 @@ extension MeetingCaptureEngine: SCStreamOutput {
 extension MeetingCaptureEngine: SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         logError("MeetingCaptureEngine", "Stream stopped unexpectedly: \(error)")
-        streamLock.lock()
-        if activeStream === stream { activeStream = nil }
-        streamLock.unlock()
-        DispatchQueue.main.async { self.appState?.isTeamsMeetingActive = false }
+
+        disableSubtitleState()
+
+        clearStreamIfCurrent(stream)
+        releaseStreamOutput(stream)
+        stopAll()
+        DispatchQueue.main.async {
+            self.appState?.meetingSubtitleEnabled = false
+            self.appState?.isTeamsMeetingActive = false
+            self.transcriptOverlay?.hide()
+            SubtitleBar.shared.hide()
+        }
     }
 }
