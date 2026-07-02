@@ -33,10 +33,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Check permissions
         checkPermissions()
 
-        // Request speech recognition authorization (for live preview + macOS built-in model)
-        SpeechStreamer.requestAuthorization { granted in
-            logInfo("App", "Speech recognition authorization: \(granted)")
-        }
+        // Qwen3 live preview runs entirely inside the app bundle.
 
         // Setup hotkey (works even before permissions are fully granted)
         HotkeyManager.shared.setup(appState: appState)

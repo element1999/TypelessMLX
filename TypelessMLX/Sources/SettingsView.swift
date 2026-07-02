@@ -211,10 +211,7 @@ struct ModelRow: View {
 
             // Right: action buttons + selected checkmark
             HStack(spacing: 6) {
-                if model.id == "macos-speech" {
-                    // No download needed — built into macOS
-                    EmptyView()
-                } else if !model.isLocal {
+                if !model.isLocal {
                     if isDownloading {
                         HStack(spacing: 4) {
                             ProgressView().scaleEffect(0.7).frame(width: 14, height: 14)
@@ -309,14 +306,14 @@ struct ModelSettingsTab: View {
                 Button("取消", role: .cancel) { deleteConfirmModelID = nil }
                 Button("删除", role: .destructive) {
                     if let id = deleteConfirmModelID,
-                       let model = AppState.availableModels.first(where: { $0.id == id }) {
+                       let model = AppState.downloadableModels.first(where: { $0.id == id }) {
                         try? modelManager.delete(model)
                     }
                     deleteConfirmModelID = nil
                 }
             } message: {
                 if let id = deleteConfirmModelID,
-                   let model = AppState.availableModels.first(where: { $0.id == id }) {
+                   let model = AppState.downloadableModels.first(where: { $0.id == id }) {
                     Text("确定要删除「\(model.id)」的本地缓存吗？下次使用时需要重新下载。")
                 }
             }
@@ -327,7 +324,7 @@ struct ModelSettingsTab: View {
                 Button("重试") {
                     if let errMsg = modelManager.downloadError,
                        let id = errMsg.components(separatedBy: "：").last,
-                       let model = AppState.availableModels.first(where: { $0.id == id }) {
+                       let model = AppState.downloadableModels.first(where: { $0.id == id }) {
                         modelManager.downloadError = nil
                         modelManager.download(model)
                     }
@@ -335,6 +332,24 @@ struct ModelSettingsTab: View {
                 Button("取消", role: .cancel) { modelManager.downloadError = nil }
             } message: {
                 Text(modelManager.downloadError ?? "")
+            }
+
+            Section("翻译/查词模型") {
+                let textModel = AppState.textModel
+                ModelRow(
+                    model: textModel,
+                    isSelected: false,
+                    isCached: modelManager.isCached(textModel),
+                    sizeString: modelManager.sizeString(for: textModel),
+                    isDownloading: modelManager.downloadingModelID == textModel.id,
+                    downloadStatusText: modelManager.downloadStatusText,
+                    anyDownloading: modelManager.downloadingModelID != nil,
+                    isSelectable: false,
+                    onSelect: {},
+                    onDownload: { modelManager.download(textModel) },
+                    onDelete: { deleteConfirmModelID = textModel.id }
+                )
+                .padding(.vertical, 2)
             }
 
             Section("语言") {

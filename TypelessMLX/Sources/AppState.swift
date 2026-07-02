@@ -87,12 +87,6 @@ class AppState: ObservableObject {
     // Available MLX models
     static let availableModels: [MLXModel] = [
         MLXModel(
-            id: "macos-speech",
-            repoOrPath: "",
-            description: "macOS 内置语音识别（快速、无需下载）",
-            isLocal: true, modelType: "macos"
-        ),
-        MLXModel(
             id: "qwen3-asr-0.6b",
             repoOrPath: "mlx-community/Qwen3-ASR-0.6B-8bit",
             description: "Qwen3-ASR 0.6B（中文精度最佳，~1GB，推荐）",
@@ -123,6 +117,18 @@ class AppState: ObservableObject {
             isLocal: false, modelType: "whisper"
         ),
     ]
+
+    static let textModel = MLXModel(
+        id: "qwen2.5-1.5b-instruct-4bit",
+        repoOrPath: "mlx-community/Qwen2.5-1.5B-Instruct-4bit",
+        description: "翻译/查词模型（约 1GB，供选中文字翻译和词典解释使用）",
+        isLocal: false,
+        modelType: "text"
+    )
+
+    static var downloadableModels: [MLXModel] {
+        availableModels + [textModel]
+    }
 
     var selectedModel: MLXModel {
         Self.availableModels.first { $0.id == selectedModelID } ?? Self.availableModels[0]
@@ -171,7 +177,7 @@ class AppState: ObservableObject {
     }
     /// Text model for lookup / translation.
     var resolvedTextModelPath: String {
-        return "mlx-community/Qwen2.5-1.5B-Instruct-4bit"
+        return Self.textModel.repoOrPath
     }
 
     private func normalizeHotkeyDefaults() {
@@ -179,6 +185,7 @@ class AppState: ObservableObject {
         case "whisper-large-v3": selectedModelID = "whisper-large-v3-947m"
         case "whisper-medium": selectedModelID = "whisper-large-v3-turbo-632m"
         case "whisper-small": selectedModelID = "whisper-small-216m"
+        case "macos-speech": selectedModelID = "qwen3-asr-1.7b"
         default: break
         }
         if !Self.availableModels.contains(where: { $0.id == selectedModelID }) {

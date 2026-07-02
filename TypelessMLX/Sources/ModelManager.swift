@@ -24,7 +24,7 @@ class ModelManager: ObservableObject {
         queue.async { [weak self] in
             guard let self = self else { return }
             var sizes: [String: Int64] = [:]
-            for model in AppState.availableModels {
+            for model in AppState.downloadableModels {
                 sizes[model.id] = self.diskSize(for: model)
             }
             DispatchQueue.main.async { self.cachedSizes = sizes }

@@ -19,7 +19,7 @@ class AudioRecorder: NSObject {
     /// Called on the audio tap thread with a normalised 0–1 level each buffer (~23ms).
     var audioLevelHandler: ((Float) -> Void)?
 
-    /// Called on the audio tap thread with each raw PCM buffer — used by SpeechStreamer for live preview.
+    /// Called on the audio tap thread with each raw PCM buffer — used by the live preview bridge.
     var audioBufferHandler: ((AVAudioPCMBuffer) -> Void)?
 
     private override init() {
@@ -134,7 +134,7 @@ class AudioRecorder: NSObject {
                     let rms = frameCount > 0 ? sqrt(sum / Float(frameCount)) : 0
                     handler(min(1.0, rms * 8.0))
                 }
-                // Forward buffer to SpeechStreamer for live preview
+                // Forward buffer to the live preview bridge.
                 self.audioBufferHandler?(buffer)
             }
 

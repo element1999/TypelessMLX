@@ -51,7 +51,6 @@ let package = Package(
                 .linkedFramework("ServiceManagement"),
                 .linkedFramework("UserNotifications"),
                 .linkedFramework("ScreenCaptureKit"),
-                .linkedFramework("Speech"),
                 .unsafeFlags(["-Xlinker", "-weak_framework", "-Xlinker", "FoundationModels"])
             ]
         ),

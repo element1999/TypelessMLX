@@ -1,7 +1,5 @@
 import Cocoa
 import Carbon
-import AVFoundation
-@preconcurrency import SpeechVAD
 
 final class HotkeyManager {
     static let shared = HotkeyManager()
@@ -28,36 +26,6 @@ final class HotkeyManager {
     private let lock = NSLock()
     private var isProcessing = false
     private var consecutiveFailures = 0
-    private let liveDraftQueue = DispatchQueue(label: "com.typelessmlx.live-draft", qos: .userInitiated)
-    private var liveDraftBuffer: [Float] = []
-    private var liveDraftSampleRate: Int = 16000
-    private var liveDraftTask: Task<Void, Never>?
-    private var liveDraftGeneration: UInt64 = 0
-    private var liveDraftLastSampleCount: Int = 0
-    private var liveDraftInFlight = false
-    private var liveDraftForceRequestPending = false
-    private var liveDraftModelType = ""
-    private var liveDraftLanguage: String?
-    private var liveDraftUsingVAD = false
-    private var liveDraftProcessor: StreamingVADProcessor?
-    private var liveDraftSpeechActive = false
-    private var liveDraftSpeechBuffer: [Float] = []
-    private var liveDraftRollingBuffer: [Float] = []
-    private var liveDraftLastPartialSampleCount: Int = 0
-    private var liveDraftSegmentID: UInt64 = 0
-    private var liveDraftCommittedSegments: [(id: UInt64, text: String)] = []
-    private var liveDraftCurrentText = ""
-    private var liveDraftPendingFinalizeSegmentID: UInt64?
-    private var liveDraftPendingFinalizeWorkItem: DispatchWorkItem?
-    private static let liveDraftFallbackMaxWindowSeconds: Double = 8
-    private static let liveDraftFallbackMinIntervalSeconds: Double = 0.8
-    private static let liveDraftFallbackMinDeltaSeconds: Double = 0.35
-    private static let liveDraftVADSampleRate = 16000
-    private static let liveDraftPartialIntervalSeconds: Double = 0.5
-    private static let liveDraftPartialMinDeltaSeconds: Double = 0.25
-    private static let liveDraftPreSpeechSeconds: Double = 0.6
-    private static let liveDraftMaxSegmentSeconds: Double = 8.0
-    private static let liveDraftFinalizeDelaySeconds: Double = 2.0
     private static let maxConsecutiveFailures = 3
 
     private init() {}
@@ -281,31 +249,19 @@ final class HotkeyManager {
             }
         }
 
-        // Start live draft preview using the selected ASR model.
+        // Start local live draft preview using the selected ASR model.
         let liveLanguage = appState.language == "auto" ? nil : appState.language
-        let ov = overlay
-        if appState.selectedModel.modelType == "macos" {
-            SpeechStreamer.shared.startStreaming(language: liveLanguage)
-            SpeechStreamer.shared.liveTextHandler = { text in
-                ov?.updateLiveText(text)
-            }
-            AudioRecorder.shared.audioBufferHandler = { buffer in
-                SpeechStreamer.shared.appendBuffer(buffer)
-            }
-            stopModelLiveDraft()
-        } else {
-            SpeechStreamer.shared.cancelStreaming()
-            SpeechStreamer.shared.liveTextHandler = nil
-            AudioRecorder.shared.audioBufferHandler = { [weak self] buffer in
-                self?.appendLiveDraftBuffer(buffer)
-            }
-            startModelLiveDraft(modelType: appState.selectedModel.modelType, language: liveLanguage)
+        AudioRecorder.shared.audioBufferHandler = { buffer in
+            LiveDraftStreamer.shared.appendBuffer(buffer)
+        }
+        LiveDraftStreamer.shared.start(modelType: appState.selectedModel.modelType, language: liveLanguage) { [weak self] text in
+            self?.overlay?.updateLiveText(text)
         }
 
         guard AudioRecorder.shared.startRecording() else {
             AudioRecorder.shared.audioLevelHandler = nil
             AudioRecorder.shared.audioBufferHandler = nil
-            SpeechStreamer.shared.cancelStreaming()
+            LiveDraftStreamer.shared.stop()
             handleFailure(appState: appState, message: "找不到可用的音频输入设备，请连接或选择麦克风")
             return
         }
@@ -334,18 +290,13 @@ final class HotkeyManager {
 
         AudioRecorder.shared.audioLevelHandler = nil
         AudioRecorder.shared.audioBufferHandler = nil
-        if appState.selectedModel.modelType == "macos" {
-            SpeechStreamer.shared.stopStreaming()
-        } else {
-            stopModelLiveDraft()
-        }
+        LiveDraftStreamer.shared.stop()
 
         AudioRecorder.shared.stopRecording { [weak self] audioURL in
             guard let self = self else { return }
 
             guard let audioURL = audioURL else {
                 logError("HotkeyManager", "stopRecording returned nil URL")
-                SpeechStreamer.shared.cancelStreaming()
                 self.handleFailure(appState: appState, message: "录音失败，未获取到音频文件")
                 return
             }
@@ -353,7 +304,6 @@ final class HotkeyManager {
             // Skip very short recordings (< 0.3s)
             if duration < 0.3 {
                 logInfo("HotkeyManager", "Recording too short (\(String(format: "%.2f", duration))s), skipping")
-                SpeechStreamer.shared.cancelStreaming()
                 self.resetState()
                 DispatchQueue.main.async {
                     appState.setStatus(.idle)
@@ -417,497 +367,30 @@ final class HotkeyManager {
                 }
             }
 
-            // Route to correct ASR backend
-            if appState.selectedModel.modelType == "macos" {
-                logInfo("HotkeyManager", "Using macOS built-in ASR")
-                SpeechStreamer.shared.transcribe(audioURL: audioURL, language: language, completion: handleResult)
-            } else if appState.selectedModel.modelType == "whisper" {
-                let modelID = appState.selectedModel.id
-                logInfo("HotkeyManager", "Using WhisperKit. Model: \(modelID)")
-                Task {
-                    do {
-                        let text = try await WhisperService.shared.transcribe(
-                            url: audioURL,
-                            language: language
-                        )
-                        handleResult(.success(text))
-                    } catch {
-                        handleResult(.failure(error))
-                    }
-                }
-            } else {
-                let model = appState.selectedModel
-                let modelType = model.modelType
-                logInfo("HotkeyManager", "Transcribing with \(modelType) model: \(model.repoOrPath.split(separator: "/").last ?? "")")
-                Task { [weak self] in
-                    guard self != nil else { return }
-                    do {
-                        let text: String
-                        switch modelType {
-                        case "qwen3":
-                            text = try await ASRService.shared.transcribe(url: audioURL, language: language)
-                        case "whisper":
-                            text = try await WhisperService.shared.transcribe(url: audioURL, language: language)
-                        default:
-                            return  // macOS model handled above
-                        }
-                        await MainActor.run { handleResult(.success(text)) }
-                    } catch {
-                        await MainActor.run { handleResult(.failure(error)) }
-                    }
-                }
-            }
-        }
-    }
-    private func startModelLiveDraft(modelType: String, language: String?) {
-        stopModelLiveDraft()
-        liveDraftQueue.sync {
-            liveDraftBuffer.removeAll(keepingCapacity: true)
-            liveDraftSampleRate = 16000
-            liveDraftLastSampleCount = 0
-            liveDraftInFlight = false
-            liveDraftForceRequestPending = false
-            liveDraftModelType = modelType
-            liveDraftLanguage = language
-            liveDraftUsingVAD = modelType == "qwen3"
-            liveDraftProcessor = nil
-            liveDraftSpeechActive = false
-            liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
-            liveDraftRollingBuffer.removeAll(keepingCapacity: true)
-            liveDraftLastPartialSampleCount = 0
-            liveDraftPendingFinalizeWorkItem?.cancel()
-            liveDraftPendingFinalizeWorkItem = nil
-            liveDraftPendingFinalizeSegmentID = nil
-            liveDraftSegmentID = 0
-            liveDraftCommittedSegments.removeAll(keepingCapacity: true)
-            liveDraftCurrentText = ""
-            liveDraftGeneration &+= 1
-        }
-
-        let generation = liveDraftQueue.sync { liveDraftGeneration }
-        if modelType == "qwen3" {
-            startQwen3VADLiveDraft(language: language, generation: generation)
-        } else {
-            startFixedWindowLiveDraft(modelType: modelType, language: language, generation: generation)
-        }
-    }
-
-    private func startQwen3VADLiveDraft(language: String?, generation: UInt64) {
-        guard let sileroCacheDir = bundledSileroVADDirectory() else {
-            logError("HotkeyManager", "Bundled Silero VAD not found; falling back to fixed-window live draft")
-            AppState.shared.showModelCacheAlert(feature: "实时字幕", modelId: SileroVADModel.defaultModelId)
-            liveDraftQueue.async { [weak self] in
-                guard let self, self.liveDraftGeneration == generation else { return }
-                self.liveDraftUsingVAD = false
-            }
-            startFixedWindowLiveDraft(modelType: "qwen3", language: language, generation: generation)
-            return
-        }
-
-        liveDraftTask = Task { [weak self] in
-            do {
-                let vad = try await SileroVADModel.fromPretrained(
-                    modelId: SileroVADModel.defaultModelId,
-                    cacheDir: sileroCacheDir,
-                    offlineMode: true
-                )
-                let config = VADConfig(
-                    onset: 0.5,
-                    offset: 0.35,
-                    minSpeechDuration: 0.18,
-                    minSilenceDuration: 0.16,
-                    windowDuration: 0.032,
-                    stepRatio: 1.0
-                )
-                let processor = StreamingVADProcessor(model: vad, config: config)
-                guard let self else { return }
-                nonisolated(unsafe) let manager = self
-                nonisolated(unsafe) let vadProcessor = processor
-                manager.liveDraftQueue.async {
-                    guard manager.liveDraftGeneration == generation else { return }
-                    manager.liveDraftProcessor = vadProcessor
-                    logInfo("HotkeyManager", "Qwen3 VAD live draft ready")
-                }
-            } catch {
-                logError("HotkeyManager", "Failed to load Silero VAD for live draft: \(error)")
-                await MainActor.run {
-                    AppState.shared.showModelCacheAlert(feature: "实时字幕", modelId: SileroVADModel.defaultModelId)
-                }
-                guard let self else { return }
-                nonisolated(unsafe) let manager = self
-                manager.liveDraftQueue.async {
-                    guard manager.liveDraftGeneration == generation else { return }
-                    manager.liveDraftUsingVAD = false
-                    manager.liveDraftProcessor = nil
-                }
-                manager.startFixedWindowLiveDraft(modelType: "qwen3", language: language, generation: generation)
-            }
-        }
-    }
-
-    private func startFixedWindowLiveDraft(modelType: String, language: String?, generation: UInt64) {
-        liveDraftTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(nanoseconds: UInt64(Self.liveDraftFallbackMinIntervalSeconds * 1_000_000_000))
-                guard !Task.isCancelled else { break }
-                self?.requestFixedWindowLiveDraft(
-                    modelType: modelType,
-                    language: language,
-                    generation: generation
-                )
-            }
-        }
-    }
-
-    private func stopModelLiveDraft() {
-        liveDraftTask?.cancel()
-        liveDraftTask = nil
-        liveDraftQueue.sync {
-            liveDraftGeneration &+= 1
-            liveDraftBuffer.removeAll(keepingCapacity: true)
-            liveDraftSampleRate = 16000
-            liveDraftLastSampleCount = 0
-            liveDraftInFlight = false
-            liveDraftForceRequestPending = false
-            liveDraftModelType = ""
-            liveDraftLanguage = nil
-            liveDraftUsingVAD = false
-            liveDraftProcessor = nil
-            liveDraftSpeechActive = false
-            liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
-            liveDraftRollingBuffer.removeAll(keepingCapacity: true)
-            liveDraftLastPartialSampleCount = 0
-            liveDraftPendingFinalizeWorkItem?.cancel()
-            liveDraftPendingFinalizeWorkItem = nil
-            liveDraftPendingFinalizeSegmentID = nil
-            liveDraftSegmentID = 0
-            liveDraftCommittedSegments.removeAll(keepingCapacity: true)
-            liveDraftCurrentText = ""
-        }
-        DispatchQueue.main.async { [weak self] in
-            self?.overlay?.updateLiveText("")
-        }
-    }
-
-    private func appendLiveDraftBuffer(_ buffer: AVAudioPCMBuffer) {
-        let sampleRate = Int(buffer.format.sampleRate.rounded())
-        let frameCount = Int(buffer.frameLength)
-        let channelCount = Int(buffer.format.channelCount)
-        guard sampleRate > 0, frameCount > 0, channelCount > 0,
-              let channelData = buffer.floatChannelData else { return }
-
-        var samples = [Float](repeating: 0, count: frameCount)
-        if channelCount == 1 {
-            samples.withUnsafeMutableBufferPointer { dst in
-                guard let base = dst.baseAddress else { return }
-                base.update(from: channelData[0], count: frameCount)
-            }
-        } else {
-            let divisor = Float(channelCount)
-            for frame in 0..<frameCount {
-                var sum: Float = 0
-                for channel in 0..<channelCount {
-                    sum += channelData[channel][frame]
-                }
-                samples[frame] = sum / divisor
-            }
-        }
-
-        liveDraftQueue.async { [weak self] in
-            guard let self else { return }
-            if self.liveDraftUsingVAD {
-                let resampled = Self.resampleLinear(
-                    samples,
-                    from: sampleRate,
-                    to: Self.liveDraftVADSampleRate
-                )
-                self.appendQwen3VADLiveDraftSamples(resampled)
-            } else {
-                self.appendFixedWindowLiveDraftSamples(samples, sampleRate: sampleRate)
-            }
-        }
-    }
-
-    private func appendQwen3VADLiveDraftSamples(_ samples: [Float]) {
-        guard !samples.isEmpty else { return }
-
-        liveDraftRollingBuffer.append(contentsOf: samples)
-        let preSpeechSamples = max(1, Int(Self.liveDraftPreSpeechSeconds * Double(Self.liveDraftVADSampleRate)))
-        if liveDraftRollingBuffer.count > preSpeechSamples {
-            liveDraftRollingBuffer.removeFirst(liveDraftRollingBuffer.count - preSpeechSamples)
-        }
-
-        guard let processor = liveDraftProcessor else { return }
-        let events = processor.process(samples: samples)
-        var startedInThisChunk = false
-
-        for event in events {
-            switch event {
-            case .speechStarted:
-                if liveDraftPendingFinalizeSegmentID != nil {
-                    cancelPendingLiveDraftFinalize()
-                    liveDraftSpeechActive = true
-                    liveDraftSpeechBuffer.append(contentsOf: liveDraftRollingBuffer)
-                } else {
-                    liveDraftSpeechActive = true
-                    liveDraftSpeechBuffer = liveDraftRollingBuffer
-                    liveDraftLastPartialSampleCount = 0
-                    liveDraftCurrentText = ""
-                    liveDraftSegmentID &+= 1
-                }
-                startedInThisChunk = true
-
-            case .speechEnded:
-                if liveDraftSpeechActive {
-                    upsertLiveDraftCommittedSegment(id: liveDraftSegmentID, text: liveDraftCurrentText)
-                    liveDraftCurrentText = ""
-                    requestQwen3VADLiveDraft(force: true)
-                    schedulePendingLiveDraftFinalize(segmentID: liveDraftSegmentID)
-                }
-                liveDraftSpeechActive = false
-                liveDraftLastPartialSampleCount = min(liveDraftLastPartialSampleCount, liveDraftSpeechBuffer.count)
-            }
-        }
-
-        if liveDraftSpeechActive && !startedInThisChunk {
-            liveDraftSpeechBuffer.append(contentsOf: samples)
-        }
-
-        let maxSegmentSamples = max(1, Int(Self.liveDraftMaxSegmentSeconds * Double(Self.liveDraftVADSampleRate)))
-        if liveDraftSpeechBuffer.count > maxSegmentSamples {
-            let excess = liveDraftSpeechBuffer.count - maxSegmentSamples
-            liveDraftSpeechBuffer.removeFirst(excess)
-            liveDraftLastPartialSampleCount = max(0, liveDraftLastPartialSampleCount - excess)
-        }
-
-        if liveDraftSpeechActive {
-            requestQwen3VADLiveDraft(force: false)
-        }
-    }
-
-    private func requestQwen3VADLiveDraft(force: Bool) {
-        if liveDraftInFlight {
-            if force { liveDraftForceRequestPending = true }
-            return
-        }
-        let minSamples = Int(Self.liveDraftPartialIntervalSeconds * Double(Self.liveDraftVADSampleRate))
-        let minDelta = Int(Self.liveDraftPartialMinDeltaSeconds * Double(Self.liveDraftVADSampleRate))
-        guard liveDraftSpeechBuffer.count >= minSamples else { return }
-        guard force || liveDraftSpeechBuffer.count - liveDraftLastPartialSampleCount >= minDelta else { return }
-
-        let audio = liveDraftSpeechBuffer
-        let language = liveDraftLanguage
-        let generation = liveDraftGeneration
-        let segmentID = liveDraftSegmentID
-        let isFinalSegment = force
-        liveDraftLastPartialSampleCount = liveDraftSpeechBuffer.count
-        liveDraftInFlight = true
-
-        Task.detached(priority: .userInitiated) { [weak self] in
-            do {
-                let text = try await ASRService.shared.transcribe(
-                    audio: audio,
-                    sampleRate: Self.liveDraftVADSampleRate,
-                    language: language
-                )
-                guard let self else { return }
-                let displayText = self.liveDraftQueue.sync { () -> String? in
-                    guard self.liveDraftGeneration == generation else { return nil }
-                    let rawCleaned = Self.cleanLiveDraftText(text)
-                    let cleaned = AppState.shared.removeFillers ? FillerCleaner.clean(rawCleaned) : rawCleaned
-                    guard !cleaned.isEmpty else {
-                        let combined = self.combinedLiveDraftText()
-                        return combined.isEmpty ? nil : combined
-                    }
-
-                    if isFinalSegment {
-                        self.upsertLiveDraftCommittedSegment(id: segmentID, text: cleaned)
-                        if self.liveDraftSegmentID == segmentID {
-                            self.liveDraftCurrentText = ""
-                        }
-                    } else if self.liveDraftSpeechActive && self.liveDraftSegmentID == segmentID {
-                        self.liveDraftCurrentText = cleaned
-                    }
-
-                    return self.combinedLiveDraftText()
-                }
-                guard let displayText, !displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-                await MainActor.run {
-                    self.overlay?.updateLiveText(displayText)
-                }
-            } catch is CancellationError {
-                // Recording stopped; final transcription path handles the result.
-            } catch {
-                logDebug("HotkeyManager", "Qwen3 VAD live draft failed: \(error.localizedDescription)")
-            }
-
-            guard let self else { return }
-            nonisolated(unsafe) let manager = self
-            manager.liveDraftQueue.async {
-                guard manager.liveDraftGeneration == generation else { return }
-                manager.liveDraftInFlight = false
-                if manager.liveDraftForceRequestPending {
-                    manager.liveDraftForceRequestPending = false
-                    manager.requestQwen3VADLiveDraft(force: true)
-                }
-            }
-        }
-    }
-
-    private func upsertLiveDraftCommittedSegment(id: UInt64, text: String) {
-        let cleaned = Self.cleanLiveDraftText(text)
-        guard !cleaned.isEmpty else { return }
-
-        if let index = liveDraftCommittedSegments.firstIndex(where: { $0.id == id }) {
-            liveDraftCommittedSegments[index].text = cleaned
-        } else if liveDraftCommittedSegments.last?.text != cleaned {
-            liveDraftCommittedSegments.append((id: id, text: cleaned))
-        }
-    }
-
-    private func combinedLiveDraftText() -> String {
-        var segments = liveDraftCommittedSegments.map { ($0.id, Self.cleanLiveDraftText($0.text)) }
-            .filter { !$0.1.isEmpty }
-        let current = Self.cleanLiveDraftText(liveDraftCurrentText)
-        if !current.isEmpty {
-            if let last = segments.last, last.0 == liveDraftSegmentID {
-                segments[segments.count - 1].1 = current
-            } else if segments.last?.1 != current {
-                segments.append((liveDraftSegmentID, current))
-            }
-        }
-        return segments.map { $0.1 }.joined(separator: " ")
-    }
-
-    private func cancelPendingLiveDraftFinalize() {
-        liveDraftPendingFinalizeWorkItem?.cancel()
-        liveDraftPendingFinalizeWorkItem = nil
-        liveDraftPendingFinalizeSegmentID = nil
-    }
-
-    private func schedulePendingLiveDraftFinalize(segmentID: UInt64) {
-        liveDraftPendingFinalizeWorkItem?.cancel()
-        liveDraftPendingFinalizeSegmentID = segmentID
-
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            guard self.liveDraftPendingFinalizeSegmentID == segmentID else { return }
-            guard !self.liveDraftSpeechActive else { return }
-            if self.liveDraftInFlight || self.liveDraftForceRequestPending {
-                self.schedulePendingLiveDraftFinalize(segmentID: segmentID)
-                return
-            }
-            self.liveDraftPendingFinalizeSegmentID = nil
-            self.liveDraftPendingFinalizeWorkItem = nil
-            self.liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
-            self.liveDraftLastPartialSampleCount = 0
-        }
-
-        liveDraftPendingFinalizeWorkItem = work
-        liveDraftQueue.asyncAfter(deadline: .now() + Self.liveDraftFinalizeDelaySeconds, execute: work)
-    }
-
-    private static func cleanLiveDraftText(_ text: String) -> String {
-        text.trimmingCharacters(in: .whitespacesAndNewlines)
-            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
-    }
-
-    private func appendFixedWindowLiveDraftSamples(_ samples: [Float], sampleRate: Int) {
-        if liveDraftSampleRate != sampleRate {
-            liveDraftBuffer.removeAll(keepingCapacity: true)
-            liveDraftLastSampleCount = 0
-            liveDraftSampleRate = sampleRate
-        }
-
-        liveDraftBuffer.append(contentsOf: samples)
-        let maxSamples = max(1, Int(Self.liveDraftFallbackMaxWindowSeconds * Double(sampleRate)))
-        if liveDraftBuffer.count > maxSamples {
-            let excess = liveDraftBuffer.count - maxSamples
-            liveDraftBuffer.removeFirst(excess)
-            liveDraftLastSampleCount = max(0, liveDraftLastSampleCount - excess)
-        }
-    }
-
-    private func requestFixedWindowLiveDraft(
-        modelType: String,
-        language: String?,
-        generation: UInt64
-    ) {
-        liveDraftQueue.async { [weak self] in
-            guard let self,
-                  self.liveDraftGeneration == generation,
-                  !self.liveDraftInFlight else { return }
-
-            let minSamples = Int(Self.liveDraftFallbackMinIntervalSeconds * Double(self.liveDraftSampleRate))
-            let minDelta = Int(Self.liveDraftFallbackMinDeltaSeconds * Double(self.liveDraftSampleRate))
-            guard self.liveDraftBuffer.count >= minSamples,
-                  self.liveDraftBuffer.count - self.liveDraftLastSampleCount >= minDelta else { return }
-
-            let audio = self.liveDraftBuffer
-            let sampleRate = self.liveDraftSampleRate
-            self.liveDraftLastSampleCount = self.liveDraftBuffer.count
-            self.liveDraftInFlight = true
-
-            Task.detached(priority: .userInitiated) { [weak self] in
+            // Route to correct local ASR backend.
+            let model = appState.selectedModel
+            let modelType = model.modelType
+            logInfo("HotkeyManager", "Transcribing with \(modelType) model: \(model.repoOrPath.split(separator: "/").last ?? "")")
+            Task { [weak self] in
+                guard self != nil else { return }
                 do {
                     let text: String
                     switch modelType {
                     case "qwen3":
-                        text = try await ASRService.shared.transcribe(audio: audio, sampleRate: sampleRate, language: language)
+                        text = try await ASRService.shared.transcribe(url: audioURL, language: language)
                     case "whisper":
-                        text = try await WhisperService.shared.transcribe(audio: audio, sampleRate: sampleRate, language: language)
+                        text = try await WhisperService.shared.transcribe(url: audioURL, language: language)
                     default:
-                        text = ""
+                        throw NSError(domain: "HotkeyManager", code: -20,
+                                      userInfo: [NSLocalizedDescriptionKey: "不支持的语音识别模型：\(modelType)"])
                     }
-
-                    guard let self else { return }
-                    let isCurrent = self.liveDraftQueue.sync { self.liveDraftGeneration == generation }
-                    guard isCurrent else { return }
-                    let cleaned = Self.cleanLiveDraftText(text)
-                    guard !cleaned.isEmpty else { return }
-                    await MainActor.run {
-                        self.overlay?.updateLiveText(cleaned)
-                    }
-                } catch is CancellationError {
-                    // Recording stopped; final transcription path handles the result.
+                    await MainActor.run { handleResult(.success(text)) }
                 } catch {
-                    logDebug("HotkeyManager", "Live draft failed: \(error.localizedDescription)")
-                }
-
-                guard let self else { return }
-                nonisolated(unsafe) let manager = self
-                manager.liveDraftQueue.async {
-                    guard manager.liveDraftGeneration == generation else { return }
-                    manager.liveDraftInFlight = false
+                    await MainActor.run { handleResult(.failure(error)) }
                 }
             }
         }
     }
-
-    private func bundledSileroVADDirectory() -> URL? {
-        guard let resourceURL = Bundle.main.resourceURL else { return nil }
-        let dir = resourceURL
-            .appendingPathComponent("silero-vad", isDirectory: true)
-            .appendingPathComponent("Silero-VAD-v5-MLX", isDirectory: true)
-        guard FileManager.default.fileExists(atPath: dir.path) else { return nil }
-        return dir
-    }
-
-    private static func resampleLinear(_ samples: [Float], from sourceRate: Int, to targetRate: Int) -> [Float] {
-        guard !samples.isEmpty, sourceRate > 0, targetRate > 0, sourceRate != targetRate else { return samples }
-        let ratio = Double(targetRate) / Double(sourceRate)
-        let outputCount = max(1, Int(Double(samples.count) * ratio))
-        var output = [Float](repeating: 0, count: outputCount)
-        for i in 0..<outputCount {
-            let sourcePosition = Double(i) / ratio
-            let lower = Int(sourcePosition)
-            let upper = min(lower + 1, samples.count - 1)
-            let fraction = Float(sourcePosition - Double(lower))
-            output[i] = samples[lower] * (1 - fraction) + samples[upper] * fraction
-        }
-        return output
-    }
-
     private func handleFailure(appState: AppState, message: String) {
         consecutiveFailures += 1
         logWarn("HotkeyManager", "Failure #\(consecutiveFailures): \(message)")
