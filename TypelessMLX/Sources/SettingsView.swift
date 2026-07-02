@@ -347,6 +347,18 @@ struct ModelSettingsTab: View {
                 }
             }
 
+            Section(header: Text("实时字幕"),
+                    footer: Text("调大刷新间隔可减少快语速时的字幕闪烁；调小则预览更实时。")) {
+                HStack {
+                    Text("刷新间隔")
+                    Spacer()
+                    Text(String(format: "%.1f 秒", appState.subtitleRefreshIntervalSeconds))
+                        .foregroundColor(.secondary)
+                        .monospacedDigit()
+                }
+                Slider(value: $appState.subtitleRefreshIntervalSeconds, in: 0.5...2.0, step: 0.1)
+            }
+
             Section(header: Text("文字后处理"),
                     footer: Text("文字修正：使用 Apple Foundation Models 修正标点与错字，需 macOS 26 + Apple Intelligence。\n移除犹豫词：无需 Apple Intelligence，所有 macOS 版本均可使用，仅移除无语义的语音犹豫（呃、嗯、啊），不影响「那个」「就是」等词汇。")) {
                 Toggle("启用文字修正", isOn: $appState.enableTextRefinement)

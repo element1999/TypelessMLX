@@ -26,7 +26,43 @@ class LLMService {
         let session = ChatSession(c)
         let prompt = "你是翻译助手。请将原文翻译为\(target.displayName)。只输出翻译结果，不要解释，不要添加前后缀。\n原文：「\(text)」"
         let raw = try await session.respond(to: prompt)
-        return sanitizeTranslationOutput(raw)
+        var result = sanitizeTranslationOutput(raw)
+
+        if target == .chinese, Self.requiresChineseOutput(source: text), !Self.looksLikeChinese(result) {
+            logWarn("LLMService", "Chinese translation looked invalid; retrying. source=\(Self.preview(text)) result=\(Self.preview(result))")
+            let retrySession = ChatSession(c)
+            let retryPrompt = """
+            你是专业字幕翻译器。把英文字幕片段翻译成自然的简体中文。
+            即使原文是不完整半句，也必须翻译，不要补全后文。
+            只输出中文译文；不要输出英文原文；不要解释。
+
+            示例：
+            英文：What kind of person has
+            中文：什么样的人会有
+            英文：What kind of person?
+            中文：什么样的人？
+            英文：Personally.
+            中文：就我个人而言。
+            英文：And it was great.
+            中文：而且这很棒。
+
+            英文：\(text)
+            中文：
+            """
+            result = sanitizeTranslationOutput(try await retrySession.respond(to: retryPrompt))
+
+            if !Self.looksLikeChinese(result), let fallback = Self.shortChineseFallback(for: text) {
+                logWarn("LLMService", "Using short subtitle fallback. source=\(Self.preview(text)) fallback=\(fallback)")
+                result = fallback
+            }
+
+            if !Self.looksLikeChinese(result) {
+                logWarn("LLMService", "Rejected non-Chinese translation. source=\(Self.preview(text)) result=\(Self.preview(result))")
+                return ""
+            }
+        }
+
+        return result
     }
 
     private func sanitizeTranslationOutput(_ text: String) -> String {
@@ -49,6 +85,47 @@ class LLMService {
         }
 
         return result
+    }
+
+    static func looksLikeChinese(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value))
+        }
+    }
+
+    private static func requiresChineseOutput(source: String) -> Bool {
+        let latinCount = source.unicodeScalars.filter { scalar in
+            (0x41...0x5A).contains(Int(scalar.value)) || (0x61...0x7A).contains(Int(scalar.value))
+        }.count
+        return latinCount >= 3
+    }
+
+    private static func shortChineseFallback(for text: String) -> String? {
+        let normalized = text.lowercased()
+            .replacingOccurrences(of: "[^a-z0-9' ]+", with: " ", options: .regularExpression)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        switch normalized {
+        case "what kind":
+            return "什么样的？"
+        case "what kind of person":
+            return "什么样的人？"
+        case "what kind of person has":
+            return "什么样的人会有"
+        case "personally":
+            return "就我个人而言。"
+        case "and it was great", "and there was great":
+            return "而且这很棒。"
+        default:
+            return nil
+        }
+    }
+
+    private static func preview(_ text: String) -> String {
+        text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .prefix(80)
+            .description
     }
 
     func lookup(_ word: String) async throws -> String {

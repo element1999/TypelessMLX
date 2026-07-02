@@ -42,7 +42,6 @@ class MeetingCaptureEngine: NSObject {
     private var fallbackSilenceSamples = 0
 
     private static let maxRollingBufferSamples = 30 * 16000  // 30 s
-    private static let livePreviewIntervalSamples = 16000 / 2  // 0.5 s
     private static let livePreviewMinAudioSamples = 16000 / 3  // ~0.33 s
     private static let livePreviewMaxWindowSamples = 16000 * 6 // 6 s tail window
     private static let liveTranslationMaxChars = 120
@@ -51,6 +50,11 @@ class MeetingCaptureEngine: NSObject {
     private static let fallbackEndSilenceSamples = 16000 / 2  // 0.5 s
     private static let fallbackStartRMS: Float = 0.010
     private static let fallbackEndRMS: Float = 0.006
+
+    private var livePreviewIntervalSamples: Int {
+        let seconds = appState?.subtitleRefreshIntervalSeconds ?? 0.5
+        return max(8000, min(32000, Int(seconds * Double(SileroVADModel.sampleRate))))
+    }
 
     // Enable/stop guard — mirrors existing pattern
     private let enableStateLock = NSLock()
@@ -369,6 +373,7 @@ private func handleVADEvent(_ event: VADEvent, token: UInt64) {
                 guard !text.isEmpty else { return }
 
                 let clean = PuncService.shared.restore(text)
+                logInfo("MeetingCaptureEngine", "Subtitle ASR: \(Self.preview(clean))")
                 var subtitleZh = await self.prefetchedChineseAsync(for: clean)
                 let initialSubtitleZh = subtitleZh
 
@@ -383,6 +388,7 @@ private func handleVADEvent(_ event: VADEvent, token: UInt64) {
                     let quickZh = (try? await LLMService.shared.translate(quickChunk)) ?? ""
                     if !quickZh.isEmpty {
                         subtitleZh = quickZh
+                        logInfo("MeetingCaptureEngine", "Subtitle quick translation: \(Self.preview(quickZh))")
                         guard self.canProceed(token: token) else { return }
                         await MainActor.run {
                             SubtitleBar.shared.commitSentence(english: clean, chinese: quickZh)
@@ -390,8 +396,15 @@ private func handleVADEvent(_ event: VADEvent, token: UInt64) {
                     }
                 }
 
-                let fullZh = (try? await LLMService.shared.translate(clean)) ?? subtitleZh
+                let translatedFullZh = (try? await LLMService.shared.translate(clean)) ?? ""
+                let fullZh = translatedFullZh.isEmpty ? subtitleZh : translatedFullZh
                 guard self.canProceed(token: token) else { return }
+
+                if fullZh.isEmpty {
+                    logWarn("MeetingCaptureEngine", "Subtitle translation empty. english=\(Self.preview(clean))")
+                } else {
+                    logInfo("MeetingCaptureEngine", "Subtitle final translation: \(Self.preview(fullZh))")
+                }
 
                 await MainActor.run {
                     SubtitleBar.shared.commitSentence(english: clean, chinese: fullZh)
@@ -409,7 +422,7 @@ private func maybeEmitLivePreview(token: UInt64) {
     guard !livePreviewInFlight else { return }
 
     let endAbs = rollingBufferStart + rollingBuffer.count
-    guard endAbs - livePreviewLastEmitAbsSample >= Self.livePreviewIntervalSamples else { return }
+    guard endAbs - livePreviewLastEmitAbsSample >= livePreviewIntervalSamples else { return }
 
     let startBuf = max(0, startIdx)
     let endBuf = rollingBuffer.count
@@ -455,6 +468,12 @@ private func maybeEmitLivePreview(token: UInt64) {
             }
         }
     }
+}
+
+private static func preview(_ text: String) -> String {
+    text.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+        .prefix(100)
+        .description
 }
 
 private func normalizeTranslationKey(_ text: String) -> String {

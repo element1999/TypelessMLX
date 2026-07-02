@@ -43,6 +43,9 @@ final class HotkeyManager {
     private var liveDraftSpeechBuffer: [Float] = []
     private var liveDraftRollingBuffer: [Float] = []
     private var liveDraftLastPartialSampleCount: Int = 0
+    private var liveDraftSegmentID: UInt64 = 0
+    private var liveDraftCommittedSegments: [(id: UInt64, text: String)] = []
+    private var liveDraftCurrentText = ""
     private static let liveDraftFallbackMaxWindowSeconds: Double = 8
     private static let liveDraftFallbackMinIntervalSeconds: Double = 0.8
     private static let liveDraftFallbackMinDeltaSeconds: Double = 0.35
@@ -466,6 +469,9 @@ final class HotkeyManager {
             liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
             liveDraftRollingBuffer.removeAll(keepingCapacity: true)
             liveDraftLastPartialSampleCount = 0
+            liveDraftSegmentID = 0
+            liveDraftCommittedSegments.removeAll(keepingCapacity: true)
+            liveDraftCurrentText = ""
             liveDraftGeneration &+= 1
         }
 
@@ -561,6 +567,9 @@ final class HotkeyManager {
             liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
             liveDraftRollingBuffer.removeAll(keepingCapacity: true)
             liveDraftLastPartialSampleCount = 0
+            liveDraftSegmentID = 0
+            liveDraftCommittedSegments.removeAll(keepingCapacity: true)
+            liveDraftCurrentText = ""
         }
         DispatchQueue.main.async { [weak self] in
             self?.overlay?.updateLiveText("")
@@ -625,10 +634,14 @@ final class HotkeyManager {
                 liveDraftSpeechActive = true
                 liveDraftSpeechBuffer = liveDraftRollingBuffer
                 liveDraftLastPartialSampleCount = 0
+                liveDraftCurrentText = ""
+                liveDraftSegmentID &+= 1
                 startedInThisChunk = true
 
             case .speechEnded:
                 if liveDraftSpeechActive {
+                    upsertLiveDraftCommittedSegment(id: liveDraftSegmentID, text: liveDraftCurrentText)
+                    liveDraftCurrentText = ""
                     requestQwen3VADLiveDraft(force: true)
                 }
                 liveDraftSpeechActive = false
@@ -643,8 +656,9 @@ final class HotkeyManager {
 
         let maxSegmentSamples = max(1, Int(Self.liveDraftMaxSegmentSeconds * Double(Self.liveDraftVADSampleRate)))
         if liveDraftSpeechBuffer.count > maxSegmentSamples {
-            liveDraftSpeechBuffer.removeFirst(liveDraftSpeechBuffer.count - maxSegmentSamples)
-            liveDraftLastPartialSampleCount = min(liveDraftLastPartialSampleCount, liveDraftSpeechBuffer.count)
+            let excess = liveDraftSpeechBuffer.count - maxSegmentSamples
+            liveDraftSpeechBuffer.removeFirst(excess)
+            liveDraftLastPartialSampleCount = max(0, liveDraftLastPartialSampleCount - excess)
         }
 
         if liveDraftSpeechActive {
@@ -653,7 +667,7 @@ final class HotkeyManager {
     }
 
     private func requestQwen3VADLiveDraft(force: Bool) {
-        guard !liveDraftInFlight else { return }
+        guard force || !liveDraftInFlight else { return }
         let minSamples = Int(Self.liveDraftPartialIntervalSeconds * Double(Self.liveDraftVADSampleRate))
         let minDelta = Int(Self.liveDraftPartialMinDeltaSeconds * Double(Self.liveDraftVADSampleRate))
         guard liveDraftSpeechBuffer.count >= minSamples else { return }
@@ -662,6 +676,8 @@ final class HotkeyManager {
         let audio = liveDraftSpeechBuffer
         let language = liveDraftLanguage
         let generation = liveDraftGeneration
+        let segmentID = liveDraftSegmentID
+        let isFinalSegment = force
         liveDraftLastPartialSampleCount = liveDraftSpeechBuffer.count
         liveDraftInFlight = true
 
@@ -673,10 +689,25 @@ final class HotkeyManager {
                     language: language
                 )
                 guard let self else { return }
-                let isCurrent = self.liveDraftQueue.sync { self.liveDraftGeneration == generation }
-                guard isCurrent else { return }
+                let displayText = self.liveDraftQueue.sync { () -> String? in
+                    guard self.liveDraftGeneration == generation else { return nil }
+                    let cleaned = Self.cleanLiveDraftText(text)
+                    guard !cleaned.isEmpty else { return self.combinedLiveDraftText() }
+
+                    if isFinalSegment {
+                        self.upsertLiveDraftCommittedSegment(id: segmentID, text: cleaned)
+                        if self.liveDraftSegmentID == segmentID {
+                            self.liveDraftCurrentText = ""
+                        }
+                    } else if self.liveDraftSpeechActive && self.liveDraftSegmentID == segmentID {
+                        self.liveDraftCurrentText = cleaned
+                    }
+
+                    return self.combinedLiveDraftText()
+                }
+                guard let displayText else { return }
                 await MainActor.run {
-                    self.overlay?.updateLiveText(text)
+                    self.overlay?.updateLiveText(displayText)
                 }
             } catch is CancellationError {
                 // Recording stopped; final transcription path handles the result.
@@ -693,6 +724,32 @@ final class HotkeyManager {
         }
     }
 
+    private func upsertLiveDraftCommittedSegment(id: UInt64, text: String) {
+        let cleaned = Self.cleanLiveDraftText(text)
+        guard !cleaned.isEmpty else { return }
+
+        if let index = liveDraftCommittedSegments.firstIndex(where: { $0.id == id }) {
+            liveDraftCommittedSegments[index].text = cleaned
+        } else if liveDraftCommittedSegments.last?.text != cleaned {
+            liveDraftCommittedSegments.append((id: id, text: cleaned))
+        }
+    }
+
+    private func combinedLiveDraftText() -> String {
+        var parts = liveDraftCommittedSegments.map { Self.cleanLiveDraftText($0.text) }
+            .filter { !$0.isEmpty }
+        let current = Self.cleanLiveDraftText(liveDraftCurrentText)
+        if !current.isEmpty, parts.last != current {
+            parts.append(current)
+        }
+        return parts.joined(separator: " ")
+    }
+
+    private static func cleanLiveDraftText(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+    }
+
     private func appendFixedWindowLiveDraftSamples(_ samples: [Float], sampleRate: Int) {
         if liveDraftSampleRate != sampleRate {
             liveDraftBuffer.removeAll(keepingCapacity: true)
@@ -703,8 +760,9 @@ final class HotkeyManager {
         liveDraftBuffer.append(contentsOf: samples)
         let maxSamples = max(1, Int(Self.liveDraftFallbackMaxWindowSeconds * Double(sampleRate)))
         if liveDraftBuffer.count > maxSamples {
-            liveDraftBuffer.removeFirst(liveDraftBuffer.count - maxSamples)
-            liveDraftLastSampleCount = min(liveDraftLastSampleCount, liveDraftBuffer.count)
+            let excess = liveDraftBuffer.count - maxSamples
+            liveDraftBuffer.removeFirst(excess)
+            liveDraftLastSampleCount = max(0, liveDraftLastSampleCount - excess)
         }
     }
 

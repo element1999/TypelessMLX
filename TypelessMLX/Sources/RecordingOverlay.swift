@@ -6,10 +6,10 @@ class RecordingOverlay {
 
     // MARK: - Layout
 
-    private let overlayWidth:  CGFloat = 280
+    private let overlayWidth:  CGFloat = 520
     private let pillRadius:    CGFloat = 22
     private let barsSectionH:  CGFloat = 58   // pill height when text is hidden
-    private let textSectionH:  CGFloat = 32   // extra height added when text is visible
+    private let textSectionH:  CGFloat = 84   // extra height added when text is visible
     private let barCount   = 13
     private let barWidth:  CGFloat = 5
     private let barGap:    CGFloat = 3.5
@@ -87,12 +87,11 @@ class RecordingOverlay {
         }
     }
 
-    /// Keep the newest tail of a long partial transcript so the label keeps changing
-    /// during long utterances instead of appearing frozen after width truncation.
+    /// Keep a larger recent context window for long partial transcripts.
     private func visibleLiveText(from text: String) -> String {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return "" }
-        let maxChars = 80
+        let maxChars = 220
         if trimmed.count <= maxChars { return trimmed }
         return "…" + String(trimmed.suffix(maxChars))
     }
@@ -314,8 +313,11 @@ class RecordingOverlay {
         label.isBezeled       = false
         label.isEditable      = false
         label.alignment       = .center
-        label.lineBreakMode   = .byTruncatingHead
-        label.frame           = CGRect(x: 16, y: 4, width: overlayWidth - 32, height: textSectionH - 8)
+        label.lineBreakMode   = .byWordWrapping
+        label.maximumNumberOfLines = 3
+        label.cell?.wraps = true
+        label.cell?.isScrollable = false
+        label.frame           = CGRect(x: 22, y: 10, width: overlayWidth - 44, height: textSectionH - 18)
         label.alphaValue      = 0
         pill.addSubview(label)
         self.textLabel = label
