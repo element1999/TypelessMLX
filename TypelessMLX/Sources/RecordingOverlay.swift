@@ -54,6 +54,7 @@ class RecordingOverlay {
     func show(text: String, isRecording: Bool) {
         if window == nil { createWindow() }
         updateBars(isRecording: isRecording)
+        positionWindowOnActiveScreen()
         window?.orderFrontRegardless()
     }
 
@@ -78,11 +79,13 @@ class RecordingOverlay {
             guard hasText else { return }
             hasText = false
             label.stringValue = ""
+            logDebug("RecordingOverlay", "Live text collapsed")
             animatePill(expand: false, window: win, pill: pill)
         } else {
             label.stringValue = visibleText
             guard !hasText else { return }
             hasText = true
+            logDebug("RecordingOverlay", "Live text expanded (\(visibleText.count) chars)")
             animatePill(expand: true, window: win, pill: pill)
         }
     }
@@ -324,14 +327,24 @@ class RecordingOverlay {
 
         w.contentView = pill
 
-        // ── Position: bottom-centre ───────────────────────────────────────────
-        if let screen = NSScreen.main {
-            let sf = screen.visibleFrame
-            w.setFrameOrigin(NSPoint(x: sf.midX - overlayWidth / 2,
-                                     y: sf.minY + 80))
-        }
-
         self.window = w
+        positionWindowOnActiveScreen()
         logInfo("RecordingOverlay", "Overlay ready (\(barCount) bars, 95% white)")
+    }
+
+    private func positionWindowOnActiveScreen() {
+        guard let window else { return }
+        let screen = screenContainingMouse() ?? NSScreen.main ?? NSScreen.screens.first
+        guard let screen else { return }
+
+        let sf = screen.visibleFrame
+        let x = min(max(sf.midX - window.frame.width / 2, sf.minX + 12), sf.maxX - window.frame.width - 12)
+        let y = sf.minY + 80
+        window.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    private func screenContainingMouse() -> NSScreen? {
+        let point = NSEvent.mouseLocation
+        return NSScreen.screens.first { NSMouseInRect(point, $0.frame, false) }
     }
 }

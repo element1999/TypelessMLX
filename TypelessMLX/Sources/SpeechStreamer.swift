@@ -109,6 +109,7 @@ class SpeechStreamer {
 
         let request = SFSpeechURLRecognitionRequest(url: audioURL)
         request.shouldReportPartialResults = false
+        request.contextualStrings = Array(DictionaryService.shared.terms.prefix(100))
 
         rec.recognitionTask(with: request) { result, error in
             if let result = result, result.isFinal {

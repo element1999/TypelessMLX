@@ -366,13 +366,14 @@ private func handleVADEvent(_ event: VADEvent, token: UInt64) {
         Task { [weak self, audio, token] in
             guard let self, self.canProceed(token: token) else { return }
             do {
-                let raw = try await ASRService.shared.transcribe(audio: audio)
+                let raw = try await ASRService.shared.transcribeSubtitle(audio: audio)
                 guard self.canProceed(token: token) else { return }
 
                 let text = self.isSilenceHallucination(raw) ? "" : raw
                 guard !text.isEmpty else { return }
 
-                let clean = PuncService.shared.restore(text)
+                let punctuated = PuncService.shared.restore(text)
+                let clean = AppState.shared.removeFillers ? FillerCleaner.clean(punctuated) : punctuated
                 logInfo("MeetingCaptureEngine", "Subtitle ASR: \(Self.preview(clean))")
                 var subtitleZh = await self.prefetchedChineseAsync(for: clean)
                 let initialSubtitleZh = subtitleZh
@@ -439,9 +440,10 @@ private func maybeEmitLivePreview(token: UInt64) {
         guard let self else { return }
 
         do {
-            let raw = try await ASRService.shared.transcribe(audio: audio)
+            let raw = try await ASRService.shared.transcribeSubtitle(audio: audio)
             let filtered = self.isSilenceHallucination(raw) ? "" : raw
-            let clean = PuncService.shared.restore(filtered)
+            let punctuated = PuncService.shared.restore(filtered)
+            let clean = AppState.shared.removeFillers ? FillerCleaner.clean(punctuated) : punctuated
 
             self.subtitleQueue.async {
                 guard self.canProceed(token: token) else {

@@ -96,7 +96,6 @@ struct GeneralSettingsTab: View {
                     .onChange(of: appState.launchAtLogin) { newValue in
                         setLaunchAtLogin(newValue)
                     }
-                Toggle("Python 后端常驻（不因空闲自动停止）", isOn: $appState.keepBackendAlive)
             }
 
             Section("网络") {
@@ -359,19 +358,23 @@ struct ModelSettingsTab: View {
                 Slider(value: $appState.subtitleRefreshIntervalSeconds, in: 0.5...2.0, step: 0.1)
             }
 
-            Section(header: Text("文字后处理"),
-                    footer: Text("文字修正：使用 Apple Foundation Models 修正标点与错字，需 macOS 26 + Apple Intelligence。\n移除犹豫词：无需 Apple Intelligence，所有 macOS 版本均可使用，仅移除无语义的语音犹豫（呃、嗯、啊），不影响「那个」「就是」等词汇。")) {
+            Section("文字后处理") {
                 Toggle("启用文字修正", isOn: $appState.enableTextRefinement)
                     .onChange(of: appState.enableTextRefinement) { newValue in
                         if newValue, #available(macOS 26, *) {
                             Task { await TextRefiner.shared.warmUp() }
                         }
                     }
-                Text("默认关闭可节省数百毫秒，仅在需要标点修正时再开启。")
+                Text("使用 Apple Foundation Models 修正最终识别文本的标点与错字，需 macOS 26 + Apple Intelligence；默认关闭以减少延迟。")
                     .font(.caption)
                     .foregroundColor(.secondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
+
                 Toggle("移除语音犹豫词（呃、嗯、啊…）", isOn: $appState.removeFillers)
+                Text("本地规则处理，无需 Apple Intelligence；作用于语音输入实时预览、会议字幕和最终文本，仅移除独立的无语义犹豫词，不影响「那个」「就是」等词汇。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
             }
 
             Section(header: Text("提示词（Initial Prompt）"),

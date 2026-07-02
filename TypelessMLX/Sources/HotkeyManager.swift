@@ -35,6 +35,7 @@ final class HotkeyManager {
     private var liveDraftGeneration: UInt64 = 0
     private var liveDraftLastSampleCount: Int = 0
     private var liveDraftInFlight = false
+    private var liveDraftForceRequestPending = false
     private var liveDraftModelType = ""
     private var liveDraftLanguage: String?
     private var liveDraftUsingVAD = false
@@ -46,6 +47,8 @@ final class HotkeyManager {
     private var liveDraftSegmentID: UInt64 = 0
     private var liveDraftCommittedSegments: [(id: UInt64, text: String)] = []
     private var liveDraftCurrentText = ""
+    private var liveDraftPendingFinalizeSegmentID: UInt64?
+    private var liveDraftPendingFinalizeWorkItem: DispatchWorkItem?
     private static let liveDraftFallbackMaxWindowSeconds: Double = 8
     private static let liveDraftFallbackMinIntervalSeconds: Double = 0.8
     private static let liveDraftFallbackMinDeltaSeconds: Double = 0.35
@@ -53,7 +56,8 @@ final class HotkeyManager {
     private static let liveDraftPartialIntervalSeconds: Double = 0.5
     private static let liveDraftPartialMinDeltaSeconds: Double = 0.25
     private static let liveDraftPreSpeechSeconds: Double = 0.6
-    private static let liveDraftMaxSegmentSeconds: Double = 6.0
+    private static let liveDraftMaxSegmentSeconds: Double = 8.0
+    private static let liveDraftFinalizeDelaySeconds: Double = 2.0
     private static let maxConsecutiveFailures = 3
 
     private init() {}
@@ -379,7 +383,8 @@ final class HotkeyManager {
 
                     switch result {
                     case .success(let text):
-                        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+                        let outputText = appState.removeFillers ? FillerCleaner.clean(text) : text
+                        let trimmed = outputText.trimmingCharacters(in: .whitespacesAndNewlines)
                         guard !trimmed.isEmpty else {
                             logWarn("HotkeyManager", "Transcription returned empty text")
                             self.resetState()
@@ -461,6 +466,7 @@ final class HotkeyManager {
             liveDraftSampleRate = 16000
             liveDraftLastSampleCount = 0
             liveDraftInFlight = false
+            liveDraftForceRequestPending = false
             liveDraftModelType = modelType
             liveDraftLanguage = language
             liveDraftUsingVAD = modelType == "qwen3"
@@ -469,6 +475,9 @@ final class HotkeyManager {
             liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
             liveDraftRollingBuffer.removeAll(keepingCapacity: true)
             liveDraftLastPartialSampleCount = 0
+            liveDraftPendingFinalizeWorkItem?.cancel()
+            liveDraftPendingFinalizeWorkItem = nil
+            liveDraftPendingFinalizeSegmentID = nil
             liveDraftSegmentID = 0
             liveDraftCommittedSegments.removeAll(keepingCapacity: true)
             liveDraftCurrentText = ""
@@ -559,6 +568,7 @@ final class HotkeyManager {
             liveDraftSampleRate = 16000
             liveDraftLastSampleCount = 0
             liveDraftInFlight = false
+            liveDraftForceRequestPending = false
             liveDraftModelType = ""
             liveDraftLanguage = nil
             liveDraftUsingVAD = false
@@ -567,6 +577,9 @@ final class HotkeyManager {
             liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
             liveDraftRollingBuffer.removeAll(keepingCapacity: true)
             liveDraftLastPartialSampleCount = 0
+            liveDraftPendingFinalizeWorkItem?.cancel()
+            liveDraftPendingFinalizeWorkItem = nil
+            liveDraftPendingFinalizeSegmentID = nil
             liveDraftSegmentID = 0
             liveDraftCommittedSegments.removeAll(keepingCapacity: true)
             liveDraftCurrentText = ""
@@ -631,11 +644,17 @@ final class HotkeyManager {
         for event in events {
             switch event {
             case .speechStarted:
-                liveDraftSpeechActive = true
-                liveDraftSpeechBuffer = liveDraftRollingBuffer
-                liveDraftLastPartialSampleCount = 0
-                liveDraftCurrentText = ""
-                liveDraftSegmentID &+= 1
+                if liveDraftPendingFinalizeSegmentID != nil {
+                    cancelPendingLiveDraftFinalize()
+                    liveDraftSpeechActive = true
+                    liveDraftSpeechBuffer.append(contentsOf: liveDraftRollingBuffer)
+                } else {
+                    liveDraftSpeechActive = true
+                    liveDraftSpeechBuffer = liveDraftRollingBuffer
+                    liveDraftLastPartialSampleCount = 0
+                    liveDraftCurrentText = ""
+                    liveDraftSegmentID &+= 1
+                }
                 startedInThisChunk = true
 
             case .speechEnded:
@@ -643,10 +662,10 @@ final class HotkeyManager {
                     upsertLiveDraftCommittedSegment(id: liveDraftSegmentID, text: liveDraftCurrentText)
                     liveDraftCurrentText = ""
                     requestQwen3VADLiveDraft(force: true)
+                    schedulePendingLiveDraftFinalize(segmentID: liveDraftSegmentID)
                 }
                 liveDraftSpeechActive = false
-                liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
-                liveDraftLastPartialSampleCount = 0
+                liveDraftLastPartialSampleCount = min(liveDraftLastPartialSampleCount, liveDraftSpeechBuffer.count)
             }
         }
 
@@ -667,7 +686,10 @@ final class HotkeyManager {
     }
 
     private func requestQwen3VADLiveDraft(force: Bool) {
-        guard force || !liveDraftInFlight else { return }
+        if liveDraftInFlight {
+            if force { liveDraftForceRequestPending = true }
+            return
+        }
         let minSamples = Int(Self.liveDraftPartialIntervalSeconds * Double(Self.liveDraftVADSampleRate))
         let minDelta = Int(Self.liveDraftPartialMinDeltaSeconds * Double(Self.liveDraftVADSampleRate))
         guard liveDraftSpeechBuffer.count >= minSamples else { return }
@@ -691,8 +713,12 @@ final class HotkeyManager {
                 guard let self else { return }
                 let displayText = self.liveDraftQueue.sync { () -> String? in
                     guard self.liveDraftGeneration == generation else { return nil }
-                    let cleaned = Self.cleanLiveDraftText(text)
-                    guard !cleaned.isEmpty else { return self.combinedLiveDraftText() }
+                    let rawCleaned = Self.cleanLiveDraftText(text)
+                    let cleaned = AppState.shared.removeFillers ? FillerCleaner.clean(rawCleaned) : rawCleaned
+                    guard !cleaned.isEmpty else {
+                        let combined = self.combinedLiveDraftText()
+                        return combined.isEmpty ? nil : combined
+                    }
 
                     if isFinalSegment {
                         self.upsertLiveDraftCommittedSegment(id: segmentID, text: cleaned)
@@ -705,7 +731,7 @@ final class HotkeyManager {
 
                     return self.combinedLiveDraftText()
                 }
-                guard let displayText else { return }
+                guard let displayText, !displayText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
                 await MainActor.run {
                     self.overlay?.updateLiveText(displayText)
                 }
@@ -720,6 +746,10 @@ final class HotkeyManager {
             manager.liveDraftQueue.async {
                 guard manager.liveDraftGeneration == generation else { return }
                 manager.liveDraftInFlight = false
+                if manager.liveDraftForceRequestPending {
+                    manager.liveDraftForceRequestPending = false
+                    manager.requestQwen3VADLiveDraft(force: true)
+                }
             }
         }
     }
@@ -736,13 +766,45 @@ final class HotkeyManager {
     }
 
     private func combinedLiveDraftText() -> String {
-        var parts = liveDraftCommittedSegments.map { Self.cleanLiveDraftText($0.text) }
-            .filter { !$0.isEmpty }
+        var segments = liveDraftCommittedSegments.map { ($0.id, Self.cleanLiveDraftText($0.text)) }
+            .filter { !$0.1.isEmpty }
         let current = Self.cleanLiveDraftText(liveDraftCurrentText)
-        if !current.isEmpty, parts.last != current {
-            parts.append(current)
+        if !current.isEmpty {
+            if let last = segments.last, last.0 == liveDraftSegmentID {
+                segments[segments.count - 1].1 = current
+            } else if segments.last?.1 != current {
+                segments.append((liveDraftSegmentID, current))
+            }
         }
-        return parts.joined(separator: " ")
+        return segments.map { $0.1 }.joined(separator: " ")
+    }
+
+    private func cancelPendingLiveDraftFinalize() {
+        liveDraftPendingFinalizeWorkItem?.cancel()
+        liveDraftPendingFinalizeWorkItem = nil
+        liveDraftPendingFinalizeSegmentID = nil
+    }
+
+    private func schedulePendingLiveDraftFinalize(segmentID: UInt64) {
+        liveDraftPendingFinalizeWorkItem?.cancel()
+        liveDraftPendingFinalizeSegmentID = segmentID
+
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            guard self.liveDraftPendingFinalizeSegmentID == segmentID else { return }
+            guard !self.liveDraftSpeechActive else { return }
+            if self.liveDraftInFlight || self.liveDraftForceRequestPending {
+                self.schedulePendingLiveDraftFinalize(segmentID: segmentID)
+                return
+            }
+            self.liveDraftPendingFinalizeSegmentID = nil
+            self.liveDraftPendingFinalizeWorkItem = nil
+            self.liveDraftSpeechBuffer.removeAll(keepingCapacity: true)
+            self.liveDraftLastPartialSampleCount = 0
+        }
+
+        liveDraftPendingFinalizeWorkItem = work
+        liveDraftQueue.asyncAfter(deadline: .now() + Self.liveDraftFinalizeDelaySeconds, execute: work)
     }
 
     private static func cleanLiveDraftText(_ text: String) -> String {
@@ -801,8 +863,10 @@ final class HotkeyManager {
                     guard let self else { return }
                     let isCurrent = self.liveDraftQueue.sync { self.liveDraftGeneration == generation }
                     guard isCurrent else { return }
+                    let cleaned = Self.cleanLiveDraftText(text)
+                    guard !cleaned.isEmpty else { return }
                     await MainActor.run {
-                        self.overlay?.updateLiveText(text)
+                        self.overlay?.updateLiveText(cleaned)
                     }
                 } catch is CancellationError {
                     // Recording stopped; final transcription path handles the result.

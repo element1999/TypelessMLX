@@ -69,7 +69,6 @@ class AppState: ObservableObject {
     @AppStorage("removeFillers") var removeFillers: Bool = false
     @AppStorage("meetingSubtitleEnabled") var meetingSubtitleEnabled: Bool = false
     @AppStorage("subtitleRefreshIntervalSeconds") var subtitleRefreshIntervalSeconds: Double = 0.5
-    @AppStorage("keepBackendAlive") var keepBackendAlive: Bool = true
     @AppStorage("customCACertPath") var customCACertPath: String = ""
     @AppStorage("lookupHotkeyKeyCode") var lookupHotkeyKeyCode: Int = 2        // kVK_ANSI_D
     @AppStorage("lookupHotkeyModifiers") var lookupHotkeyModifiers: Int = 6144  // controlKey | optionKey

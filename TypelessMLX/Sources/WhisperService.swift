@@ -47,6 +47,8 @@ actor WhisperService {
             options.detectLanguage = false
         }
 
+        await applyRecognitionPrompt(to: &options, tokenizer: wk.tokenizer)
+
         let results = try await wk.transcribe(audioPath: url.path, decodeOptions: options)
         let rawText = results.map { $0.text }.joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
@@ -95,10 +97,22 @@ actor WhisperService {
             options.detectLanguage = false
         }
 
+        await applyRecognitionPrompt(to: &options, tokenizer: wk.tokenizer)
+
         let results = try await wk.transcribe(audioArray: input, decodeOptions: options)
         let rawText = results.map { $0.text }.joined()
             .trimmingCharacters(in: .whitespacesAndNewlines)
         return sanitizeWhisperOutput(rawText)
+    }
+
+    private func applyRecognitionPrompt(to options: inout DecodingOptions, tokenizer: WhisperTokenizer?) async {
+        guard let tokenizer else { return }
+        let basePrompt = await MainActor.run { AppState.shared.initialPrompt }
+        let prompt = DictionaryService.shared.buildPrompt(basePrompt: basePrompt)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !prompt.isEmpty else { return }
+        options.promptTokens = tokenizer.encode(text: " " + prompt)
+            .filter { token in token < tokenizer.specialTokens.specialTokenBegin }
     }
 
     func unload() {

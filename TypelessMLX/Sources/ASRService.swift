@@ -24,9 +24,8 @@ enum ASRServiceError: LocalizedError {
 actor ASRService {
     static let shared = ASRService()
 
-    private var model: Qwen3ASRModel?
-    private var loadTask: Task<Qwen3ASRModel, Error>?
-    private var currentModelKey: String = ""
+    private var models: [String: Qwen3ASRModel] = [:]
+    private var loadTasks: [String: Task<Qwen3ASRModel, Error>] = [:]
 
     private init() {}
 
@@ -36,20 +35,30 @@ actor ASRService {
     func transcribe(url: URL, language: String? = nil) async throws -> String {
         let (samples, sampleRate) = try loadAudio(from: url)
         let request = await dictationModelRequest()
-        return try await transcribe(audio: samples, sampleRate: sampleRate, language: language, request: request)
+        let context = await recognitionContextPrompt()
+        return try await transcribe(audio: samples, sampleRate: sampleRate, language: language, request: request, context: context)
     }
 
-    /// Transcribes raw PCM samples. For subtitle streaming via MeetingCaptureEngine.
+    /// Transcribes raw PCM samples using the same selected model as final dictation.
     func transcribe(audio: [Float], sampleRate: Int = 16000, language: String? = nil) async throws -> String {
+        let request = await dictationModelRequest()
+        let context = await recognitionContextPrompt()
+        return try await transcribe(audio: audio, sampleRate: sampleRate, language: language, request: request, context: context)
+    }
+
+    /// Transcribes meeting/subtitle audio with the lightweight subtitle model.
+    func transcribeSubtitle(audio: [Float], sampleRate: Int = 16000, language: String? = nil) async throws -> String {
         let request = subtitleModelRequest()
-        return try await transcribe(audio: audio, sampleRate: sampleRate, language: language, request: request)
+        let context = await recognitionContextPrompt()
+        return try await transcribe(audio: audio, sampleRate: sampleRate, language: language, request: request, context: context)
     }
 
     private func transcribe(
         audio: [Float],
         sampleRate: Int,
         language: String?,
-        request: ModelLoadRequest
+        request: ModelLoadRequest,
+        context: String?
     ) async throws -> String {
         let loaded = try await loadedModel(
             modelKey: request.modelKey,
@@ -61,9 +70,16 @@ actor ASRService {
         // transcribe() is synchronous and GPU-intensive — run off the cooperative thread pool.
         return await Task.detached(priority: .userInitiated) {
             Device.withDefaultDevice(device) {
-                loaded.transcribe(audio: audio, sampleRate: sampleRate, language: lang)
+                loaded.transcribe(audio: audio, sampleRate: sampleRate, language: lang, context: context)
             }
         }.value
+    }
+
+    private func recognitionContextPrompt() async -> String? {
+        let basePrompt = await MainActor.run { AppState.shared.initialPrompt }
+        let prompt = DictionaryService.shared.buildPrompt(basePrompt: basePrompt)
+        let trimmed = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
     }
 
     private struct ModelLoadRequest {
@@ -103,12 +119,11 @@ actor ASRService {
         )
     }
 
-    /// Releases the loaded model.
+    /// Releases the loaded models.
     func stop() {
-        model = nil
-        loadTask?.cancel()
-        loadTask = nil
-        currentModelKey = ""
+        models.removeAll(keepingCapacity: false)
+        for task in loadTasks.values { task.cancel() }
+        loadTasks.removeAll(keepingCapacity: false)
         logInfo("ASRService", "ASRService stopped")
     }
 
@@ -119,29 +134,22 @@ actor ASRService {
         requestedModelId: String,
         localSnapshotPath: String?
     ) async throws -> Qwen3ASRModel {
-        if let m = model, currentModelKey == modelKey { return m }
-        if let t = loadTask, currentModelKey == modelKey { return try await t.value }
+        if let model = models[modelKey] { return model }
+        if let task = loadTasks[modelKey] { return try await task.value }
 
-        loadTask?.cancel()
-        currentModelKey = modelKey
-
-        let t = Task<Qwen3ASRModel, Error> { [weak self] in
+        let task = Task<Qwen3ASRModel, Error> { [weak self] in
             guard let self else { throw CancellationError() }
-            let m = try await self.buildModel(requestedModelId: requestedModelId, localSnapshotPath: localSnapshotPath)
-            await self.storeModel(m, key: modelKey)
-            return m
+            let model = try await self.buildModel(requestedModelId: requestedModelId, localSnapshotPath: localSnapshotPath)
+            await self.storeModel(model, key: modelKey)
+            return model
         }
-        loadTask = t
-        return try await t.value
+        loadTasks[modelKey] = task
+        return try await task.value
     }
 
-    private func storeModel(_ m: Qwen3ASRModel, key: String) {
-        guard currentModelKey == key else {
-            logDebug("ASRService", "Discarding stale model load for \(key.split(separator: "/").last ?? Substring(key))")
-            return
-        }
-        model = m
-        loadTask = nil
+    private func storeModel(_ model: Qwen3ASRModel, key: String) {
+        models[key] = model
+        loadTasks[key] = nil
         logInfo("ASRService", "Qwen3ASR model ready: \(key.split(separator: "/").last ?? Substring(key))")
     }
 

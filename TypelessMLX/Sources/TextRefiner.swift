@@ -3,8 +3,8 @@ import Foundation
 #if canImport(FoundationModels)
 import FoundationModels
 
-/// Post-processes ASR transcription using Apple Foundation Models (on-device LLM).
-/// Corrects punctuation and removes filler words while preserving meaning.
+/// Post-processes final ASR transcription using Apple Foundation Models (on-device LLM).
+/// Corrects punctuation while preserving the recognized words.
 /// Requires macOS 26+ with Apple Intelligence enabled.
 @available(macOS 26, *)
 actor TextRefiner {

@@ -64,6 +64,10 @@ let package = Package(
             name: "TypelessMLXAudioInputAvailabilityTests",
             dependencies: ["TypelessMLXAudioInputSupport"],
             path: "TypelessMLX/Tests/AudioInputAvailability"
+        ),
+        .executableTarget(
+            name: "TypelessMLXFillerCleanerTests",
+            path: "TypelessMLX/Tests/FillerCleaner"
         )
     ]
 )
