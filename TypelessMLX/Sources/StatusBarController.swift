@@ -118,9 +118,9 @@ class StatusBarController: NSObject, NSMenuDelegate {
                                                        modifiers: appState.lookupHotkeyModifiers)
         let translateLabel = HotkeyRecorderNSView.format(keyCode: appState.translateHotkeyKeyCode,
                                                           modifiers: appState.translateHotkeyModifiers)
-        let translateItem = NSMenuItem(title: "翻译选中文字  (\(lookupLabel))", action: #selector(translateSelectedText), keyEquivalent: "")
-        translateItem.target = self
-        menu.addItem(translateItem)
+        let lookupItem = NSMenuItem(title: "查词选中文字  (\(lookupLabel))", action: #selector(lookupSelectedText), keyEquivalent: "")
+        lookupItem.target = self
+        menu.addItem(lookupItem)
 
         let translateSentenceItem = NSMenuItem(title: "翻译整句  (\(translateLabel))", action: #selector(translateSentence), keyEquivalent: "")
         translateSentenceItem.target = self
@@ -213,7 +213,7 @@ class StatusBarController: NSObject, NSMenuDelegate {
         return text
     }
 
-    @objc private func translateSelectedText() {
+    @objc private func lookupSelectedText() {
         if let text = pendingSelectedText {
             pendingSelectedText = nil
             LookupManager.shared.lookupText(text)
